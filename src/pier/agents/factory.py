@@ -3,6 +3,8 @@ from pathlib import Path
 
 from pier.agents.base import BaseAgent
 from pier.agents.installed.claude_code import ClaudeCode
+from pier.agents.nop import NopAgent
+from pier.agents.oracle import OracleAgent
 from pier.models.agent.name import AgentName
 from pier.models.trial.config import AgentConfig
 from pier.utils.env import resolve_env_vars
@@ -10,6 +12,8 @@ from pier.utils.env import resolve_env_vars
 
 class AgentFactory:
     _AGENTS: list[type[BaseAgent]] = [
+        NopAgent,
+        OracleAgent,
         ClaudeCode,
     ]
     _AGENT_MAP: dict[AgentName, type[BaseAgent]] = {
