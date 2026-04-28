@@ -83,7 +83,7 @@ def new_proxy_token() -> str:
 
 
 def squid_bootstrap_command() -> str:
-    return r"""
+    return r"""#!/usr/bin/env bash
 set -eu
 
 printf '%s' "$ALLOWLIST_DOMAINS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
@@ -146,7 +146,7 @@ def write_docker_proxy_compose(
                 "rm -rf /var/lib/apt/lists/*",
                 "COPY start-squid.sh /usr/local/bin/start-squid.sh",
                 "RUN chmod +x /usr/local/bin/start-squid.sh",
-                'CMD ["/usr/local/bin/start-squid.sh"]',
+                'CMD ["bash", "/usr/local/bin/start-squid.sh"]',
                 "",
             ]
         )
