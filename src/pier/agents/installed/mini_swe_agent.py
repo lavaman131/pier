@@ -25,6 +25,7 @@ from pier.environments.base import BaseEnvironment
 from pier.models.agent.context import AgentContext
 from pier.models.agent.install import AgentInstallSpec, InstallStep
 from pier.models.agent.name import AgentName
+from pier.models.agent.network import NetworkAllowlist
 from pier.models.trajectories import (
     Agent,
     FinalMetrics,
@@ -335,10 +336,16 @@ def convert_and_save_trajectory(
         raise
 
 
-class MiniSweNativeBackend(AgentBackend):
-    """The only mini-swe-agent backend: pass ``model_name`` straight to
-    LiteLLM and forward the relevant provider env vars.
-    """
+class MiniSweBackend(AgentBackend):
+    """mini-swe-agent backend surface."""
+
+    def config_flags(self, ctx: BackendContext) -> str:
+        """Return backend-specific ``mini-swe-agent -c`` overrides."""
+        return ""
+
+
+class MiniSweNativeBackend(MiniSweBackend):
+    """Pass ``model_name`` straight to LiteLLM and forward provider env vars."""
 
     name = "native"
 
@@ -382,6 +389,48 @@ class MiniSweNativeBackend(AgentBackend):
         return ctx.runtime_model_name or ctx.model_name
 
 
+class MiniSweRespanBackend(MiniSweBackend):
+    """mini-swe-agent routed through Respan's OpenAI-compatible gateway."""
+
+    name = "respan"
+
+    _BASE_URL = "https://endpoint.respan.ai/api/"
+
+    def validate(self, ctx: BackendContext) -> None:
+        if not ctx.model_name:
+            raise ValueError(
+                f"Model name is required for {ctx.agent_name} backend {self.name!r}"
+            )
+        split_model_name(ctx.model_name)
+        require_env(
+            backend_label=f"{ctx.agent_name} backend {self.name!r}",
+            get_env=ctx.get_env,
+            any_of=(("RESPAN_API_KEY",),),
+        )
+
+    def build_env(self, ctx: BackendContext) -> dict[str, str]:
+        respan_key = ctx.get_env("RESPAN_API_KEY")
+        if not respan_key:
+            return {}
+        return {
+            "OPENAI_API_KEY": respan_key,
+            "RESPAN_API_KEY": respan_key,
+        }
+
+    def runtime_model_name(self, ctx: BackendContext) -> str | None:
+        # Respan routes on provider-prefixed model ids, so keep the model as-is.
+        return ctx.runtime_model_name or ctx.model_name
+
+    def config_flags(self, ctx: BackendContext) -> str:
+        return (
+            "-c model.model_kwargs.custom_llm_provider=openai "
+            f"-c model.model_kwargs.api_base={shlex.quote(self._BASE_URL)} "
+        )
+
+    def network_allowlist(self) -> NetworkAllowlist:
+        return NetworkAllowlist(domains=["endpoint.respan.ai"])
+
+
 class MiniSweAgent(BaseInstalledAgent):
     """
     The Mini SWE Agent uses the mini-swe-agent tool to solve tasks.
@@ -389,7 +438,7 @@ class MiniSweAgent(BaseInstalledAgent):
 
     SUPPORTS_ATIF: bool = True
     DEFAULT_BACKEND = "native"
-    BACKENDS = backend_registry(MiniSweNativeBackend())
+    BACKENDS = backend_registry(MiniSweNativeBackend(), MiniSweRespanBackend())
 
     CLI_FLAGS = [
         CliFlag(
@@ -547,6 +596,7 @@ class MiniSweAgent(BaseInstalledAgent):
         escaped_instruction = shlex.quote(augmented_instruction)
 
         backend = self.require_backend_spec()
+        assert isinstance(backend, MiniSweBackend)
         ctx = self.backend_context(self._get_env)
         runtime_model_name = backend.runtime_model_name(ctx)
         if not runtime_model_name:
@@ -579,6 +629,7 @@ class MiniSweAgent(BaseInstalledAgent):
 
         if self._reasoning_effort:
             config_flags += f"-c model.model_kwargs.extra_body.reasoning_effort={shlex.quote(self._reasoning_effort)} "
+        config_flags += backend.config_flags(ctx)
 
         await self.exec_as_agent(
             environment,

@@ -21,6 +21,7 @@ from pier.environments.base import BaseEnvironment
 from pier.models.agent.context import AgentContext
 from pier.models.agent.install import AgentInstallSpec, InstallStep
 from pier.models.agent.name import AgentName
+from pier.models.agent.network import NetworkAllowlist
 from pier.models.trajectories import (
     Agent,
     FinalMetrics,
@@ -143,6 +144,8 @@ class CodexRespanBackend(CodexBackend):
     """Codex routed through the Respan gateway."""
 
     name = "respan"
+    _STREAM_IDLE_TIMEOUT_MS = 60 * 60 * 1000
+    _STREAM_MAX_RETRIES = 30
 
     def validate(self, ctx: BackendContext) -> None:
         # Respan runs with full provider/model names so Codex forwards them
@@ -172,10 +175,15 @@ class CodexRespanBackend(CodexBackend):
                 'base_url = "https://endpoint.respan.ai/api/"\n'
                 'wire_api = "responses"\n'
                 'env_key = "RESPAN_API_KEY"\n'
+                f"stream_idle_timeout_ms = {self._STREAM_IDLE_TIMEOUT_MS}\n"
+                f"stream_max_retries = {self._STREAM_MAX_RETRIES}\n"
                 "TOML"
             ),
             env={"RESPAN_API_KEY": ctx.get_env("RESPAN_API_KEY") or ""},
         )
+
+    def network_allowlist(self) -> NetworkAllowlist:
+        return NetworkAllowlist(domains=["endpoint.respan.ai"])
 
 
 class Codex(BaseInstalledAgent):
@@ -187,7 +195,7 @@ class Codex(BaseInstalledAgent):
     DEFAULT_BACKEND = "openai"
     BACKENDS = backend_registry(CodexOpenAIBackend(), CodexRespanBackend())
     _OUTPUT_FILENAME = "codex.txt"
-    _REMOTE_CODEX_HOME = PurePosixPath("/tmp/codex-home")
+    _REMOTE_CODEX_HOME = EnvironmentPaths.agent_dir / "codex-home"
     _REMOTE_CODEX_SECRETS_DIR = PurePosixPath("/tmp/codex-secrets")
 
     CLI_FLAGS = [

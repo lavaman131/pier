@@ -61,7 +61,7 @@ Pier separates model identity from runtime wiring:
   - `claude-code`: `anthropic` (default), `respan`, `vertex_ai`
   - `codex`: `openai` (default), `respan`
   - `gemini-cli`: `gemini` (default), `vertex_ai`, `respan`
-  - `mini-swe-agent`: `native` (default; dispatches to LiteLLM)
+  - `mini-swe-agent`: `native` (default; dispatches to LiteLLM), `respan`
   - `opencode`: `native` (default; dispatches to the agent's own provider layer)
 - `--runtime-model` / `agent.runtime_model_name` is an advanced override for the exact model string passed to the agent runtime. Leave it unset unless the backend needs a different provider-specific model id.
 
