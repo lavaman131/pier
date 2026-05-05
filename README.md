@@ -73,6 +73,34 @@ agents:
       reasoning_effort: max
 ```
 
+Codex should use a Codex model provider entry for Respan rather than only
+`OPENAI_BASE_URL`. The provider-prefixed model name is passed to the Codex CLI
+with `command_model_name`, while `model_name` remains Pier's trial metadata:
+
+```yaml
+agents:
+  - name: codex
+    model_name: gpt-5.5
+    env:
+      RESPAN_API_KEY: ${RESPAN_API_KEY}
+    kwargs:
+      config_toml: |
+        model_provider = "respan"
+
+        [model_providers.respan]
+        name = "Respan Gateway"
+        base_url = "https://endpoint.respan.ai/api/"
+        wire_api = "responses"
+        env_key = "RESPAN_API_KEY"
+      command_model_name: openai/gpt-5.5
+      reasoning_effort: xhigh
+```
+
+`wire_api = "responses"` keeps Codex on HTTP Responses instead of WebSockets,
+which is the transport expected by Respan. Pier's network allowlist reads URLs
+from `config_toml`, so the `base_url` above is allowlisted without any code
+changes.
+
 OpenCode exposes `opencode_config` for provider entries that Pier does not know
 about:
 
