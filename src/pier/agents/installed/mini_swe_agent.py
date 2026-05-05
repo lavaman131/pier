@@ -89,10 +89,16 @@ def _build_step_metrics(
         step_cost = (completion_tokens / total_completion_tokens) * total_cost_usd
 
     extra_metrics: dict[str, Any] = {}
+    reasoning_tokens = completion_tokens_details.get("reasoning_tokens") or 0
+    text_tokens = completion_tokens_details.get("text_tokens")
+    if text_tokens is None and completion_tokens > 0 and reasoning_tokens > 0:
+        text_tokens = max(0, completion_tokens - reasoning_tokens)
     if prompt_tokens_details:
         extra_metrics["prompt_tokens_details"] = prompt_tokens_details
     if completion_tokens_details:
         extra_metrics["completion_tokens_details"] = completion_tokens_details
+    if text_tokens is not None:
+        extra_metrics["text_tokens"] = text_tokens
 
     return Metrics(
         prompt_tokens=prompt_tokens,
@@ -104,12 +110,12 @@ def _build_step_metrics(
 
 
 def _parse_tool_calls(
-    message: dict[str, Any], content: str, step_id: int
-) -> tuple[list[ToolCall] | None, str | None]:
+    message: dict[str, Any], step_id: int
+) -> list[ToolCall] | None:
     """Parse tool calls from an assistant message into ATIF ToolCall objects."""
     message_tool_calls = message.get("tool_calls")
     if not message_tool_calls:
-        return None, content if content else None
+        return None
 
     tool_calls: list[ToolCall] = []
     for tc in message_tool_calls:
@@ -134,9 +140,21 @@ def _parse_tool_calls(
             )
         )
 
-    # In tool-calling mode, the content is typically reasoning/thinking
-    reasoning = content if content else None
-    return tool_calls if tool_calls else None, reasoning
+    return tool_calls if tool_calls else None
+
+
+def _reasoning_from_message(message: dict[str, Any]) -> str | None:
+    if reasoning_content := _normalize_content(message.get("reasoning_content")):
+        return reasoning_content
+    if reasoning := _normalize_content(message.get("reasoning")):
+        return reasoning
+
+    thinking_parts: list[str] = []
+    for block in message.get("thinking_blocks") or []:
+        if isinstance(block, dict) and block.get("thinking"):
+            thinking_parts.append(str(block["thinking"]))
+
+    return "\n".join(thinking_parts) if thinking_parts else None
 
 
 def _usage_from_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -146,20 +164,28 @@ def _usage_from_message(message: dict[str, Any]) -> dict[str, Any]:
     return usage if isinstance(usage, dict) else {}
 
 
-def _response_output_text_and_tool_calls(
+def _response_output_text_reasoning_and_tool_calls(
     message: dict[str, Any], step_id: int
-) -> tuple[str, list[ToolCall] | None]:
+) -> tuple[str, str | None, list[ToolCall] | None]:
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[ToolCall] = []
 
     for item in message.get("output") or []:
         if not isinstance(item, dict):
             continue
-        if item.get("type") == "message":
+        item_type = item.get("type")
+        if item_type == "message":
             for part in item.get("content") or []:
                 if isinstance(part, dict) and part.get("text"):
                     text_parts.append(str(part["text"]))
-        elif item.get("type") == "function_call":
+        elif item_type == "reasoning":
+            for part in item.get("summary") or item.get("content") or []:
+                if isinstance(part, dict) and part.get("text"):
+                    reasoning_parts.append(str(part["text"]))
+                elif isinstance(part, str):
+                    reasoning_parts.append(part)
+        elif item_type == "function_call":
             raw_args = item.get("arguments") or "{}"
             if isinstance(raw_args, str):
                 try:
@@ -180,7 +206,7 @@ def _response_output_text_and_tool_calls(
                 )
             )
 
-    return "\n".join(text_parts), tool_calls or None
+    return "\n".join(text_parts), "\n".join(reasoning_parts) or None, tool_calls or None
 
 
 def convert_mini_swe_agent_to_atif(
@@ -222,6 +248,7 @@ def convert_mini_swe_agent_to_atif(
     total_completion_tokens = 0
     total_cached_tokens = 0
     total_reasoning_tokens = 0
+    total_text_tokens = 0
     total_cost_usd = (info.get("model_stats") or {}).get("instance_cost") or 0.0
 
     # First pass: count total completion tokens for cost apportioning
@@ -260,10 +287,14 @@ def convert_mini_swe_agent_to_atif(
             or 0
         )
         reasoning_tokens = completion_tokens_details.get("reasoning_tokens") or 0
+        text_tokens = completion_tokens_details.get("text_tokens")
+        if text_tokens is None and completion_tokens > 0 and reasoning_tokens > 0:
+            text_tokens = max(0, completion_tokens - reasoning_tokens)
 
         total_prompt_tokens += prompt_tokens
         total_cached_tokens += cached_tokens
         total_reasoning_tokens += reasoning_tokens
+        total_text_tokens += text_tokens or 0
 
         if role == "system":
             steps.append(
@@ -294,7 +325,8 @@ def convert_mini_swe_agent_to_atif(
             _add_observation_to_last_agent_step(steps, content, _logger, i)
 
         elif role == "assistant":
-            tool_calls, reasoning = _parse_tool_calls(message, content, step_id)
+            tool_calls = _parse_tool_calls(message, step_id)
+            reasoning = _reasoning_from_message(message)
 
             metrics = _build_step_metrics(
                 prompt_tokens=prompt_tokens,
@@ -322,10 +354,11 @@ def convert_mini_swe_agent_to_atif(
             step_id += 1
 
         elif message.get("object") == "response":
-            response_content, tool_calls = _response_output_text_and_tool_calls(
-                message, step_id
-            )
-            reasoning = response_content if response_content else None
+            (
+                response_content,
+                reasoning,
+                tool_calls,
+            ) = _response_output_text_reasoning_and_tool_calls(message, step_id)
 
             metrics = _build_step_metrics(
                 prompt_tokens=prompt_tokens,
@@ -362,6 +395,8 @@ def convert_mini_swe_agent_to_atif(
     final_extra: dict[str, Any] = {}
     if total_reasoning_tokens > 0:
         final_extra["total_reasoning_tokens"] = total_reasoning_tokens
+    if total_text_tokens > 0:
+        final_extra["total_text_tokens"] = total_text_tokens
     final_extra = extra_with_context_metrics(
         final_extra if final_extra else None,
         peak_context_tokens=peak_context_tokens_from_steps(steps),
@@ -467,6 +502,7 @@ class MiniSweAgent(BaseInstalledAgent):
         cost_limit: str | int | float | None = 0,
         reasoning_effort: str | None = None,
         model_class: str | None = "auto",
+        model_kwargs: dict[str, Any] | None = None,
         config_yaml: str | None = None,
         config_file: str | None = None,
         *args,
@@ -476,6 +512,7 @@ class MiniSweAgent(BaseInstalledAgent):
         self._cost_limit = cost_limit
         self._reasoning_effort = reasoning_effort
         self._model_class = model_class
+        self._model_kwargs = model_kwargs or {}
         self._config_yaml = config_yaml
         if config_file:
             self._config_yaml = Path(config_file).read_text()
@@ -625,6 +662,12 @@ mini-swe-agent --help
             return self.model_name.removeprefix("openrouter/")
         return self.model_name or ""
 
+    def _model_kwargs_config_flags(self) -> str:
+        return "".join(
+            f"-c model.model_kwargs.{key}={shlex.quote(json.dumps(value))} "
+            for key, value in self._model_kwargs.items()
+        )
+
     def _build_config_flags(self, *, custom_config_path: str | None = None) -> str:
         config_flags = "-c mini.yaml "
 
@@ -642,6 +685,8 @@ mini-swe-agent --help
                 f"-c model.model_kwargs.reasoning_effort="
                 f"{shlex.quote(self._reasoning_effort)} "
             )
+
+        config_flags += self._model_kwargs_config_flags()
 
         return config_flags
 
