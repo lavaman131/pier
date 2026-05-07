@@ -132,6 +132,7 @@ class TaskFilters(BaseModel):
     agents: list[FilterOption]
     providers: list[FilterOption]
     models: list[FilterOption]
+    sources: list[FilterOption]
     tasks: list[FilterOption]
 
 
@@ -176,37 +177,62 @@ class TaskDefinitionFilters(BaseModel):
     tags: list[FilterOption] = []
 
 
-class ComparisonTask(BaseModel):
-    """A task identifier for the comparison grid."""
+class JobHeatmapRouteParams(BaseModel):
+    """Exact route params for drilling into a heatmap cell."""
 
+    job_name: str | None = None
     source: str | None = None
-    task_name: str
-    key: str
-
-
-class ComparisonAgentModel(BaseModel):
-    """A job+agent+model identifier for the comparison grid."""
-
-    job_name: str
     agent_name: str | None = None
     model_provider: str | None = None
     model_name: str | None = None
+    task_name: str
+
+
+class JobHeatmapRow(BaseModel):
+    """A grouped row in the job heatmap."""
+
     key: str
+    label: str
+    job_name: str | None = None
+    agent_name: str | None = None
+    model_provider: str | None = None
+    model_name: str | None = None
 
 
-class ComparisonCell(BaseModel):
-    """A cell in the comparison grid."""
+class JobHeatmapColumn(BaseModel):
+    """A grouped column in the job heatmap."""
 
-    job_name: str
-    avg_reward: float | None = None
-    avg_duration_ms: float | None = None
+    key: str
+    label: str
+    source: str | None = None
+    task_name: str | None = None
+
+
+class JobHeatmapCell(BaseModel):
+    """Aggregated trial stats for one heatmap crossing."""
+
+    row_key: str
+    column_key: str
     n_trials: int = 0
     n_completed: int = 0
+    n_errors: int = 0
+    avg_reward: float | None = None
+    avg_duration_ms: float | None = None
+    avg_input_tokens: float | None = None
+    avg_cached_input_tokens: float | None = None
+    avg_output_tokens: float | None = None
+    avg_cost_usd: float | None = None
+    total_cost_usd: float | None = None
+    avg_peak_context_tokens: float | None = None
+    avg_agent_steps: float | None = None
+    exception_counts: dict[str, int] = {}
+    dominant_exception: str | None = None
+    route_params: JobHeatmapRouteParams | None = None
 
 
-class ComparisonGridData(BaseModel):
-    """Data for the job comparison grid view."""
+class JobHeatmapData(BaseModel):
+    """Data for the single-job heatmap view."""
 
-    tasks: list[ComparisonTask]
-    agent_models: list[ComparisonAgentModel]
-    cells: dict[str, dict[str, ComparisonCell]]  # task.key -> am.key -> cell
+    rows: list[JobHeatmapRow]
+    columns: list[JobHeatmapColumn]
+    cells: dict[str, dict[str, JobHeatmapCell]]  # row.key -> column.key -> cell

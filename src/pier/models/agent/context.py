@@ -26,6 +26,10 @@ class AgentContext(BaseModel):
         default=None,
         description="The number of detected context summarization or compaction events.",
     )
+    n_agent_steps: int | None = Field(
+        default=None,
+        description="The number of agent-authored trajectory steps.",
+    )
     rollout_details: list[RolloutDetail] | None = Field(
         default=None,
         description=(

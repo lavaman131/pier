@@ -19,14 +19,15 @@ from pier.models.job.config import (
 from pier.models.job.result import JobStats
 from pier.models.trial.result import TrialResult
 from pier.viewer.models import (
-    ComparisonAgentModel,
-    ComparisonCell,
-    ComparisonGridData,
-    ComparisonTask,
     EvalSummary,
     FileInfo,
     FilterOption,
     JobFilters,
+    JobHeatmapCell,
+    JobHeatmapColumn,
+    JobHeatmapData,
+    JobHeatmapRouteParams,
+    JobHeatmapRow,
     JobSummary,
     ModelPricing,
     PaginatedResponse,
@@ -81,6 +82,31 @@ class TaskGroupStats(TypedDict):
     agent_steps_count: int
 
 
+class HeatmapGroupStats(TypedDict):
+    """Stats accumulated for one heatmap cell."""
+
+    n_trials: int
+    n_completed: int
+    n_errors: int
+    exception_counts: dict[str, int]
+    total_reward: float
+    reward_count: int
+    total_duration_ms: float
+    duration_count: int
+    total_input_tokens: int
+    input_tokens_count: int
+    total_cached_input_tokens: int
+    cached_input_tokens_count: int
+    total_output_tokens: int
+    output_tokens_count: int
+    total_cost_usd: float
+    cost_usd_count: int
+    total_peak_context_tokens: int
+    peak_context_tokens_count: int
+    total_agent_steps: int
+    agent_steps_count: int
+
+
 def _uncached_input(n_input: int | None, n_cache: int | None) -> int | None:
     """Derive uncached input token count from raw input + cache totals.
 
@@ -94,24 +120,13 @@ def _uncached_input(n_input: int | None, n_cache: int | None) -> int | None:
     return max(0, n_input - n_cache)
 
 
-def _agent_step_count_from_trajectory(trial_dir: Path) -> int | None:
-    trajectory_path = trial_dir / "agent" / "trajectory.json"
-    if not trajectory_path.exists():
-        return None
-    try:
-        trajectory = json.loads(trajectory_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
+def _agent_step_count_from_result(result: TrialResult) -> int | None:
+    """Read promoted agent step counts from trial result.json.
 
-    total = 0
-    found_steps = False
-    for step in trajectory.get("steps") or []:
-        if not isinstance(step, dict):
-            continue
-        found_steps = True
-        if step.get("source") == "agent":
-            total += 1
-    return total if found_steps else None
+    Older trials may not have this field; those intentionally surface as
+    missing until a backfill rewrites their result.json files.
+    """
+    return result.agent_step_count()
 
 
 # Maximum file size to serve (1MB)
@@ -622,9 +637,10 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
             if result:
                 total_agent_steps: int | None = None
                 for trial_name in scanner.list_trials(name):
-                    agent_steps = _agent_step_count_from_trajectory(
-                        scanner.jobs_dir / name / trial_name
-                    )
+                    trial_result = scanner.get_trial_result(name, trial_name)
+                    if trial_result is None:
+                        continue
+                    agent_steps = _agent_step_count_from_result(trial_result)
                     if agent_steps is not None:
                         total_agent_steps = (total_agent_steps or 0) + agent_steps
 
@@ -923,118 +939,6 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                 status_code=500, detail=f"Failed to delete job: {str(e)}"
             )
 
-    @app.get("/api/compare", response_model=ComparisonGridData)
-    def get_comparison_data(
-        job: list[str] = Query(..., description="Job names to compare"),
-    ) -> ComparisonGridData:
-        """Get comparison grid data for multiple jobs."""
-        # Validate all jobs exist
-        existing_jobs = scanner.list_jobs()
-        for job_name in job:
-            if job_name not in existing_jobs:
-                raise HTTPException(
-                    status_code=404, detail=f"Job '{job_name}' not found"
-                )
-
-        # Collect all task summaries from all jobs
-        # Group by (source, task_name) for tasks and (job_name, agent_name, model_provider, model_name) for agent_models
-        tasks_set: set[tuple[str | None, str]] = set()
-        agent_models_set: set[tuple[str, str | None, str | None, str | None]] = set()
-        # cells[task_key][am_key] = ComparisonCell
-        cells: dict[str, dict[str, ComparisonCell]] = {}
-
-        for job_name in job:
-            summaries = _get_all_task_summaries(job_name)
-            for summary in summaries:
-                task_key = f"{summary.source or ''}::{summary.task_name}"
-                am_key = f"{job_name}::{summary.agent_name or ''}::{summary.model_provider or ''}::{summary.model_name or ''}"
-
-                tasks_set.add((summary.source, summary.task_name))
-                agent_models_set.add(
-                    (
-                        job_name,
-                        summary.agent_name,
-                        summary.model_provider,
-                        summary.model_name,
-                    )
-                )
-
-                if task_key not in cells:
-                    cells[task_key] = {}
-
-                cells[task_key][am_key] = ComparisonCell(
-                    job_name=job_name,
-                    avg_reward=summary.avg_reward,
-                    avg_duration_ms=summary.avg_duration_ms,
-                    n_trials=summary.n_trials,
-                    n_completed=summary.n_completed,
-                )
-
-        # Calculate average reward per task (across all agent_models)
-        task_avg_rewards: dict[str, float] = {}
-        for source, task_name in tasks_set:
-            task_key = f"{source or ''}::{task_name}"
-            task_cells = cells.get(task_key, {})
-            if task_cells:
-                rewards = [cell.avg_reward or 0.0 for cell in task_cells.values()]
-                task_avg_rewards[task_key] = sum(rewards) / len(rewards)
-            else:
-                task_avg_rewards[task_key] = 0.0
-
-        # Build task list sorted by average reward (high to low), then alphabetically
-        tasks = sorted(
-            [
-                ComparisonTask(
-                    source=source,
-                    task_name=task_name,
-                    key=f"{source or ''}::{task_name}",
-                )
-                for source, task_name in tasks_set
-            ],
-            key=lambda t: (
-                -task_avg_rewards.get(t.key, 0.0),
-                t.source or "",
-                t.task_name,
-            ),
-        )
-
-        # Calculate average reward per agent_model (across all tasks)
-        am_avg_rewards: dict[str, float] = {}
-        for job_name, agent_name, model_provider, model_name in agent_models_set:
-            am_key = f"{job_name}::{agent_name or ''}::{model_provider or ''}::{model_name or ''}"
-            rewards = []
-            for task_key, task_cells in cells.items():
-                if am_key in task_cells:
-                    rewards.append(task_cells[am_key].avg_reward or 0.0)
-            am_avg_rewards[am_key] = sum(rewards) / len(rewards) if rewards else 0.0
-
-        # Build agent_model list sorted by average reward (high to low), then alphabetically
-        agent_models = sorted(
-            [
-                ComparisonAgentModel(
-                    job_name=job_name,
-                    agent_name=agent_name,
-                    model_provider=model_provider,
-                    model_name=model_name,
-                    key=f"{job_name}::{agent_name or ''}::{model_provider or ''}::{model_name or ''}",
-                )
-                for job_name, agent_name, model_provider, model_name in agent_models_set
-            ],
-            key=lambda am: (
-                -am_avg_rewards.get(am.key, 0.0),
-                am.job_name,
-                am.agent_name or "",
-                am.model_provider or "",
-                am.model_name or "",
-            ),
-        )
-
-        return ComparisonGridData(
-            tasks=tasks,
-            agent_models=agent_models,
-            cells=cells,
-        )
-
     @app.get("/api/jobs/{job_name}/config", response_model=JobConfig)
     def get_job_config(job_name: str) -> JobConfig:
         """Get job configuration."""
@@ -1149,9 +1053,7 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                 )
                 groups[key]["peak_context_tokens_count"] += 1
 
-            agent_steps = _agent_step_count_from_trajectory(
-                scanner.jobs_dir / job_name / name
-            )
+            agent_steps = _agent_step_count_from_result(result)
             if agent_steps is not None:
                 groups[key]["total_agent_steps"] += agent_steps
                 groups[key]["agent_steps_count"] += 1
@@ -1245,6 +1147,7 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
         agent_counts: Counter[str] = Counter()
         provider_counts: Counter[str] = Counter()
         model_counts: Counter[str] = Counter()
+        source_counts: Counter[str] = Counter()
         task_counts: Counter[str] = Counter()
 
         for summary in summaries:
@@ -1254,6 +1157,8 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                 provider_counts[summary.model_provider] += 1
             if summary.model_name:
                 model_counts[summary.model_name] += 1
+            if summary.source:
+                source_counts[summary.source] += 1
             if summary.task_name:
                 task_counts[summary.task_name] += 1
 
@@ -1267,6 +1172,10 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
             ],
             models=[
                 FilterOption(value=v, count=c) for v, c in sorted(model_counts.items())
+            ],
+            sources=[
+                FilterOption(value=v, count=c)
+                for v, c in sorted(source_counts.items())
             ],
             tasks=[
                 FilterOption(value=v, count=c) for v, c in sorted(task_counts.items())
@@ -1286,6 +1195,7 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
         agent: list[str] = Query(default=[], description="Filter by agent names"),
         provider: list[str] = Query(default=[], description="Filter by provider names"),
         model: list[str] = Query(default=[], description="Filter by model names"),
+        source: list[str] = Query(default=[], description="Filter by datasets/sources"),
         task: list[str] = Query(default=[], description="Filter by task names"),
         sort_by: str | None = Query(
             default=None,
@@ -1323,6 +1233,10 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
         # Filter by models
         if model:
             summaries = [s for s in summaries if s.model_name in model]
+
+        # Filter by datasets/sources
+        if source:
+            summaries = [s for s in summaries if s.source in source]
 
         # Filter by task names
         if task:
@@ -1408,6 +1322,419 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
             total_pages=total_pages,
         )
 
+    def _build_heatmap(
+        job_names: list[str],
+        *,
+        row_by: str,
+        column_by: str,
+        q: str | None,
+        agent: list[str],
+        provider: list[str],
+        model: list[str],
+        source: list[str],
+        task: list[str],
+        exclude_errored: bool,
+        only_successful: bool,
+        include_job_in_rows: bool,
+    ) -> JobHeatmapData:
+        """Build a heatmap for one or more jobs from raw trial results."""
+        existing_jobs = scanner.list_jobs()
+        for job_name in job_names:
+            if job_name not in existing_jobs:
+                raise HTTPException(
+                    status_code=404, detail=f"Job '{job_name}' not found"
+                )
+
+        rows: dict[str, JobHeatmapRow] = {}
+        columns: dict[str, JobHeatmapColumn] = {}
+        cell_stats: dict[tuple[str, str], HeatmapGroupStats] = {}
+        route_params: dict[tuple[str, str], JobHeatmapRouteParams] = {}
+
+        def new_stats() -> HeatmapGroupStats:
+            return {
+                "n_trials": 0,
+                "n_completed": 0,
+                "n_errors": 0,
+                "exception_counts": {},
+                "total_reward": 0.0,
+                "reward_count": 0,
+                "total_duration_ms": 0.0,
+                "duration_count": 0,
+                "total_input_tokens": 0,
+                "input_tokens_count": 0,
+                "total_cached_input_tokens": 0,
+                "cached_input_tokens_count": 0,
+                "total_output_tokens": 0,
+                "output_tokens_count": 0,
+                "total_cost_usd": 0.0,
+                "cost_usd_count": 0,
+                "total_peak_context_tokens": 0,
+                "peak_context_tokens_count": 0,
+                "total_agent_steps": 0,
+                "agent_steps_count": 0,
+            }
+
+        def full_model_name(
+            model_provider: str | None, model_name: str | None
+        ) -> str | None:
+            if model_provider and model_name:
+                return f"{model_provider}/{model_name}"
+            return model_name
+
+        def row_for(
+            current_job_name: str,
+            agent_name: str | None,
+            model_provider: str | None,
+            model_name: str | None,
+        ) -> JobHeatmapRow:
+            full_model = full_model_name(model_provider, model_name)
+            key_prefix = f"job::{current_job_name}::" if include_job_in_rows else ""
+            label_prefix = f"{current_job_name} / " if include_job_in_rows else ""
+            if row_by == "agent":
+                key = f"{key_prefix}agent::{agent_name or ''}"
+                label = agent_name or "Unknown agent"
+                return JobHeatmapRow(
+                    key=key,
+                    label=f"{label_prefix}{label}",
+                    job_name=current_job_name if include_job_in_rows else None,
+                    agent_name=agent_name,
+                )
+            if row_by == "model":
+                key = f"{key_prefix}model::{model_provider or ''}::{model_name or ''}"
+                label = full_model or "Unknown model"
+                return JobHeatmapRow(
+                    key=key,
+                    label=f"{label_prefix}{label}",
+                    job_name=current_job_name if include_job_in_rows else None,
+                    model_provider=model_provider,
+                    model_name=model_name,
+                )
+            key = f"{key_prefix}config::{agent_name or ''}::{model_provider or ''}::{model_name or ''}"
+            parts = [p for p in [agent_name, full_model] if p]
+            return JobHeatmapRow(
+                key=key,
+                label=f"{label_prefix}{' / '.join(parts) or 'Unknown config'}",
+                job_name=current_job_name if include_job_in_rows else None,
+                agent_name=agent_name,
+                model_provider=model_provider,
+                model_name=model_name,
+            )
+
+        def column_for(source_name: str | None, task_name: str) -> JobHeatmapColumn:
+            if column_by == "dataset":
+                key = f"dataset::{source_name or ''}"
+                return JobHeatmapColumn(
+                    key=key,
+                    label=source_name or "No dataset",
+                    source=source_name,
+                )
+            key = f"task::{source_name or ''}::{task_name}"
+            label = f"{source_name} / {task_name}" if source_name else task_name
+            return JobHeatmapColumn(
+                key=key,
+                label=label,
+                source=source_name,
+                task_name=task_name,
+            )
+
+        for job_name in job_names:
+            for trial_name in scanner.list_trials(job_name):
+                result = scanner.get_trial_result(job_name, trial_name)
+                if not result:
+                    continue
+
+                agent_name = result.agent_info.name
+                model_info = result.agent_info.model_info
+                model_provider = model_info.provider if model_info else None
+                model_name = model_info.name if model_info else None
+                result_full_model_name = full_model_name(model_provider, model_name)
+                source_name = result.source
+                task_name = result.task_name
+
+                if q:
+                    query = q.lower()
+                    searchable = [
+                        job_name,
+                        task_name,
+                        source_name,
+                        agent_name,
+                        model_provider,
+                        model_name,
+                        result_full_model_name,
+                    ]
+                    if not any(value and query in value.lower() for value in searchable):
+                        continue
+                if agent and agent_name not in agent:
+                    continue
+                if provider and model_provider not in provider:
+                    continue
+                if model and model_name not in model:
+                    continue
+                if source and source_name not in source:
+                    continue
+                if task and task_name not in task:
+                    continue
+                if (exclude_errored or only_successful) and result.exception_info:
+                    continue
+                if only_successful:
+                    trial_reward = (
+                        result.verifier_result.rewards.get("reward")
+                        if result.verifier_result and result.verifier_result.rewards
+                        else None
+                    )
+                    if trial_reward is None or trial_reward < 1:
+                        continue
+
+                row = row_for(job_name, agent_name, model_provider, model_name)
+                column = column_for(source_name, task_name)
+                rows[row.key] = row
+                columns[column.key] = column
+
+                key = (row.key, column.key)
+                stats = cell_stats.setdefault(key, new_stats())
+                stats["n_trials"] += 1
+
+                if result.finished_at:
+                    stats["n_completed"] += 1
+                    if result.started_at:
+                        duration_ms = (
+                            result.finished_at - result.started_at
+                        ).total_seconds() * 1000
+                        stats["total_duration_ms"] += duration_ms
+                        stats["duration_count"] += 1
+
+                if result.exception_info:
+                    stats["n_errors"] += 1
+                    exception_type = result.exception_info.exception_type
+                    stats["exception_counts"][exception_type] = (
+                        stats["exception_counts"].get(exception_type, 0) + 1
+                    )
+
+                reward = (
+                    result.verifier_result.rewards.get("reward", 0)
+                    if result.verifier_result and result.verifier_result.rewards
+                    else 0
+                )
+                stats["total_reward"] += reward
+                stats["reward_count"] += 1
+
+                n_input, n_cache, n_output, cost = result.compute_token_cost_totals()
+                uncached = _uncached_input(n_input, n_cache)
+                if uncached is not None:
+                    stats["total_input_tokens"] += uncached
+                    stats["input_tokens_count"] += 1
+                if n_cache is not None:
+                    stats["total_cached_input_tokens"] += n_cache
+                    stats["cached_input_tokens_count"] += 1
+                if n_output is not None:
+                    stats["total_output_tokens"] += n_output
+                    stats["output_tokens_count"] += 1
+                if cost is not None:
+                    stats["total_cost_usd"] += cost
+                    stats["cost_usd_count"] += 1
+
+                if (
+                    result.agent_result is not None
+                    and result.agent_result.peak_context_tokens is not None
+                ):
+                    stats["total_peak_context_tokens"] += (
+                        result.agent_result.peak_context_tokens
+                    )
+                    stats["peak_context_tokens_count"] += 1
+
+                agent_steps = _agent_step_count_from_result(result)
+                if agent_steps is not None:
+                    stats["total_agent_steps"] += agent_steps
+                    stats["agent_steps_count"] += 1
+
+                if row_by == "config" and column_by == "task":
+                    route_params[key] = JobHeatmapRouteParams(
+                        job_name=job_name,
+                        source=source_name,
+                        agent_name=agent_name,
+                        model_provider=model_provider,
+                        model_name=model_name,
+                        task_name=task_name,
+                    )
+
+        cells: dict[str, dict[str, JobHeatmapCell]] = {}
+        row_reward_totals: dict[str, list[float]] = {}
+        column_reward_totals: dict[str, list[float]] = {}
+
+        def average(total_key: str, count_key: str, stats: HeatmapGroupStats):
+            count = stats[count_key]  # type: ignore[literal-required]
+            if count <= 0:
+                return None
+            total = stats[total_key]  # type: ignore[literal-required]
+            return total / count
+
+        for (row_key, column_key), stats in cell_stats.items():
+            dominant_exception = None
+            if stats["exception_counts"]:
+                dominant_exception = max(
+                    stats["exception_counts"].items(),
+                    key=lambda item: (item[1], item[0]),
+                )[0]
+
+            avg_reward = average("total_reward", "reward_count", stats)
+            if avg_reward is not None:
+                row_reward_totals.setdefault(row_key, []).append(avg_reward)
+                column_reward_totals.setdefault(column_key, []).append(avg_reward)
+
+            cell = JobHeatmapCell(
+                row_key=row_key,
+                column_key=column_key,
+                n_trials=stats["n_trials"],
+                n_completed=stats["n_completed"],
+                n_errors=stats["n_errors"],
+                avg_reward=avg_reward,
+                avg_duration_ms=average("total_duration_ms", "duration_count", stats),
+                avg_input_tokens=average(
+                    "total_input_tokens", "input_tokens_count", stats
+                ),
+                avg_cached_input_tokens=average(
+                    "total_cached_input_tokens", "cached_input_tokens_count", stats
+                ),
+                avg_output_tokens=average(
+                    "total_output_tokens", "output_tokens_count", stats
+                ),
+                avg_cost_usd=average("total_cost_usd", "cost_usd_count", stats),
+                total_cost_usd=(
+                    stats["total_cost_usd"] if stats["cost_usd_count"] > 0 else None
+                ),
+                avg_peak_context_tokens=average(
+                    "total_peak_context_tokens", "peak_context_tokens_count", stats
+                ),
+                avg_agent_steps=average(
+                    "total_agent_steps", "agent_steps_count", stats
+                ),
+                exception_counts=stats["exception_counts"],
+                dominant_exception=dominant_exception,
+                route_params=route_params.get((row_key, column_key)),
+            )
+            cells.setdefault(row_key, {})[column_key] = cell
+
+        def mean(values: list[float]) -> float:
+            return sum(values) / len(values) if values else 0.0
+
+        sorted_rows = sorted(
+            rows.values(),
+            key=lambda row: (-mean(row_reward_totals.get(row.key, [])), row.label),
+        )
+        sorted_columns = sorted(
+            columns.values(),
+            key=lambda column: (
+                -mean(column_reward_totals.get(column.key, [])),
+                column.label,
+            ),
+        )
+
+        return JobHeatmapData(
+            rows=sorted_rows,
+            columns=sorted_columns,
+            cells=cells,
+        )
+
+    @app.get(
+        "/api/jobs/{job_name}/heatmap",
+        response_model=JobHeatmapData,
+    )
+    def get_job_heatmap(
+        job_name: str,
+        row_by: str = Query(
+            default="config",
+            pattern="^(config|agent|model)$",
+            description="Row grouping: config, agent, or model",
+        ),
+        column_by: str = Query(
+            default="task",
+            pattern="^(task|dataset)$",
+            description="Column grouping: task or dataset",
+        ),
+        q: str | None = Query(default=None, description="Search query"),
+        agent: list[str] = Query(default=[], description="Filter by agent names"),
+        provider: list[str] = Query(default=[], description="Filter by provider names"),
+        model: list[str] = Query(default=[], description="Filter by model names"),
+        source: list[str] = Query(default=[], description="Filter by datasets/sources"),
+        task: list[str] = Query(default=[], description="Filter by task names"),
+        exclude_errored: bool = Query(
+            default=False,
+            description="If true, drop errored trials from aggregation entirely.",
+        ),
+        only_successful: bool = Query(
+            default=False,
+            description=(
+                "If true, only include trials with reward >= 1. Implies "
+                "exclude_errored."
+            ),
+        ),
+    ) -> JobHeatmapData:
+        """Build a heatmap for one job from raw trial results."""
+        return _build_heatmap(
+            [job_name],
+            row_by=row_by,
+            column_by=column_by,
+            q=q,
+            agent=agent,
+            provider=provider,
+            model=model,
+            source=source,
+            task=task,
+            exclude_errored=exclude_errored,
+            only_successful=only_successful,
+            include_job_in_rows=False,
+        )
+
+    @app.get(
+        "/api/compare/heatmap",
+        response_model=JobHeatmapData,
+    )
+    def get_comparison_heatmap(
+        job: list[str] = Query(..., description="Job names to compare"),
+        row_by: str = Query(
+            default="config",
+            pattern="^(config|agent|model)$",
+            description="Row grouping: config, agent, or model",
+        ),
+        column_by: str = Query(
+            default="task",
+            pattern="^(task|dataset)$",
+            description="Column grouping: task or dataset",
+        ),
+        q: str | None = Query(default=None, description="Search query"),
+        agent: list[str] = Query(default=[], description="Filter by agent names"),
+        provider: list[str] = Query(default=[], description="Filter by provider names"),
+        model: list[str] = Query(default=[], description="Filter by model names"),
+        source: list[str] = Query(default=[], description="Filter by datasets/sources"),
+        task: list[str] = Query(default=[], description="Filter by task names"),
+        exclude_errored: bool = Query(
+            default=False,
+            description="If true, drop errored trials from aggregation entirely.",
+        ),
+        only_successful: bool = Query(
+            default=False,
+            description=(
+                "If true, only include trials with reward >= 1. Implies "
+                "exclude_errored."
+            ),
+        ),
+    ) -> JobHeatmapData:
+        """Build the shared heatmap view for cross-job comparison."""
+        return _build_heatmap(
+            job,
+            row_by=row_by,
+            column_by=column_by,
+            q=q,
+            agent=agent,
+            provider=provider,
+            model=model,
+            source=source,
+            task=task,
+            exclude_errored=exclude_errored,
+            only_successful=only_successful,
+            include_job_in_rows=True,
+        )
+
     @app.get(
         "/api/jobs/{job_name}/trials",
         response_model=PaginatedResponse[TrialSummary],
@@ -1480,9 +1807,7 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                 if result.agent_result is not None
                 else None
             )
-            agent_steps = _agent_step_count_from_trajectory(
-                scanner.jobs_dir / job_name / name
-            )
+            agent_steps = _agent_step_count_from_result(result)
 
             all_summaries.append(
                 TrialSummary(

@@ -1517,6 +1517,11 @@ function TrialContent({
   const summarizationCount =
     typeof summarizationCountRaw === "number" ? summarizationCountRaw : null;
 
+  const [activeTab, setActiveTab] = useQueryState(
+    "tab",
+    parseAsString.withDefault("trajectory")
+  );
+
   return (
     <>
       <CodeBlock
@@ -1673,7 +1678,11 @@ function TrialContent({
         </div>
       )}
 
-      <Tabs defaultValue="trajectory" className={hasSteps ? "" : "mt-6"}>
+      <Tabs
+        value={activeTab}
+        onValueChange={setActiveTab}
+        className={hasSteps ? "" : "mt-6"}
+      >
         <TabsList className="bg-card border border-b-0 w-full">
           <TabsTrigger value="trajectory">Trajectory</TabsTrigger>
           <TabsTrigger value="agent-logs">Agent Logs</TabsTrigger>

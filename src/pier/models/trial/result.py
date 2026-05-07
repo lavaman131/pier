@@ -85,7 +85,29 @@ class TrialResult(BaseModel):
     agent_setup: TimingInfo | None = None
     agent_execution: TimingInfo | None = None
     verifier: TimingInfo | None = None
+    n_agent_steps: int | None = None
     step_results: list[StepResult] | None = None
+
+    def agent_step_count(self) -> int | None:
+        if self.n_agent_steps is not None:
+            return self.n_agent_steps
+        if (
+            self.agent_result is not None
+            and self.agent_result.n_agent_steps is not None
+        ):
+            return self.agent_result.n_agent_steps
+        if not self.step_results:
+            return None
+
+        total = 0
+        found = False
+        for step_result in self.step_results:
+            agent_result = step_result.agent_result
+            if agent_result is None or agent_result.n_agent_steps is None:
+                continue
+            found = True
+            total += agent_result.n_agent_steps
+        return total if found else None
 
     def compute_token_cost_totals(
         self,

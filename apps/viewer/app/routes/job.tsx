@@ -4,10 +4,34 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import type { ColumnDef, SortingState, VisibilityState } from "@tanstack/react-table";
-import { FileText, Search, Trash2, X } from "lucide-react";
+import type {
+  Column,
+  ColumnDef,
+  SortingState,
+  VisibilityState,
+} from "@tanstack/react-table";
+import {
+  ArrowDown,
+  ArrowDownToLine,
+  ArrowUp,
+  ArrowUpDown,
+  ArrowUpFromLine,
+  Database,
+  FileText,
+  Layers,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
 import { parseAsArrayOf, parseAsString, useQueryState } from "nuqs";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { Link, useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
@@ -48,6 +72,11 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "~/components/ui/empty";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "~/components/ui/hover-card";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import {
@@ -66,19 +95,29 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
+import { IndeterminateBar } from "~/components/ui/indeterminate-bar";
 import { LoadingDots } from "~/components/ui/loading-dots";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { Kbd } from "~/components/ui/kbd";
 import {
   deleteJob,
   fetchJob,
+  fetchJobHeatmap,
   fetchJobSummary,
   fetchTaskFilters,
   fetchTasks,
   summarizeJob,
 } from "~/lib/api";
 import { useDebouncedValue, useKeyboardTableNavigation } from "~/lib/hooks";
-import type { TaskSummary } from "~/lib/types";
+import type { JobHeatmapTrialsFilter } from "~/lib/api";
+import type {
+  JobHeatmapCell,
+  JobHeatmapColumnBy,
+  JobHeatmapData,
+  JobHeatmapRowBy,
+  TaskSummary,
+} from "~/lib/types";
+import { cn } from "~/lib/utils";
 
 function CopyableValue({ value }: { value: string }) {
   const handleClick = async () => {
@@ -234,13 +273,308 @@ function getTaskUrl(task: TaskSummary, jobName: string): string {
   return `/jobs/${encodeURIComponent(jobName)}/tasks/${encodeURIComponent(source)}/${encodeURIComponent(agent)}/${encodeURIComponent(modelProvider)}/${encodeURIComponent(modelName)}/${encodeURIComponent(task.task_name)}`;
 }
 
+function getHeatmapTaskUrl(jobName: string, cell: JobHeatmapCell): string | null {
+  const params = cell.route_params;
+  if (!params) return null;
+  const targetJobName = params.job_name ?? jobName;
+  const source = params.source || "_";
+  const agent = params.agent_name || "_";
+  const modelProvider = params.model_provider || "_";
+  const modelName = params.model_name || "_";
+  return `/jobs/${encodeURIComponent(targetJobName)}/tasks/${encodeURIComponent(source)}/${encodeURIComponent(agent)}/${encodeURIComponent(modelProvider)}/${encodeURIComponent(modelName)}/${encodeURIComponent(params.task_name)}`;
+}
+
+function NumericHeader({
+  children,
+  column,
+}: {
+  children: React.ReactNode;
+  column: Column<TaskSummary, unknown>;
+}) {
+  return (
+    <div className="flex items-center justify-end">
+      <SortableHeader column={column}>{children}</SortableHeader>
+    </div>
+  );
+}
+
+function TextHeader({
+  children,
+  column,
+}: {
+  children: React.ReactNode;
+  column: Column<TaskSummary, unknown>;
+}) {
+  return (
+    <div className="flex items-center">
+      <SortableHeader column={column}>{children}</SortableHeader>
+    </div>
+  );
+}
+
+/**
+ * Icon-only header for compact columns (e.g. token counts). The button
+ * itself is the sortable trigger; hovering or focusing it reveals a tooltip
+ * with the full label and a one-line description.
+ *
+ * We don't reuse `SortableHeader` here because it wraps its children in a
+ * `truncate` span, which clips the SVG icon when the column is narrow.
+ */
+function IconHeader({
+  icon: Icon,
+  label,
+  description,
+  column,
+}: {
+  icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
+  label: string;
+  description?: React.ReactNode;
+  column: Column<TaskSummary, unknown>;
+}) {
+  const sorted = column.getIsSorted();
+  return (
+    <div className="flex items-center justify-end">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-3 h-8 gap-1 px-2"
+              onClick={() => column.toggleSorting(sorted === "asc")}
+              aria-label={`Sort by ${label}`}
+            >
+              <Icon className="size-4" aria-hidden />
+              {sorted === "asc" ? (
+                <ArrowUp className="size-3.5" />
+              ) : sorted === "desc" ? (
+                <ArrowDown className="size-3.5" />
+              ) : (
+                <ArrowUpDown className="size-3.5 opacity-50" />
+              )}
+            </Button>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-xs">
+          <div className="font-medium">{label}</div>
+          {description ? (
+            <div className="mt-0.5 opacity-80">{description}</div>
+          ) : null}
+        </TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
+
+// ---- Task column width: a tiny external store so the Task header can
+// drive the cell width without re-creating the columns array on every
+// render (or moving the column defs inside the component).
+const TASK_WIDTH_STORAGE_KEY = "pier.job.taskColWidth";
+const TASK_WIDTH_DEFAULT = 280;
+const TASK_WIDTH_MIN = 120;
+const TASK_WIDTH_MAX = 1200;
+
+const taskWidthStore = (() => {
+  let value = TASK_WIDTH_DEFAULT;
+  if (typeof window !== "undefined") {
+    const raw = window.localStorage.getItem(TASK_WIDTH_STORAGE_KEY);
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    if (Number.isFinite(parsed)) {
+      value = Math.min(Math.max(parsed, TASK_WIDTH_MIN), TASK_WIDTH_MAX);
+    }
+  }
+  const subs = new Set<() => void>();
+  return {
+    get: () => value,
+    set: (next: number) => {
+      const clamped = Math.min(
+        Math.max(Math.round(next), TASK_WIDTH_MIN),
+        TASK_WIDTH_MAX
+      );
+      if (clamped === value) return;
+      value = clamped;
+      try {
+        window.localStorage.setItem(TASK_WIDTH_STORAGE_KEY, String(value));
+      } catch {}
+      subs.forEach((cb) => cb());
+    },
+    subscribe: (cb: () => void) => {
+      subs.add(cb);
+      return () => {
+        subs.delete(cb);
+      };
+    },
+  };
+})();
+
+function useTaskWidth(): number {
+  return useSyncExternalStore(
+    taskWidthStore.subscribe,
+    taskWidthStore.get,
+    () => TASK_WIDTH_DEFAULT
+  );
+}
+
+function TaskHeaderCell({ column }: { column: Column<TaskSummary, unknown> }) {
+  const width = useTaskWidth();
+  // The resize handle lives in <TaskColResizeOverlay /> rendered as a
+  // sibling of the table, so it can extend the full table height (the table
+  // container's overflow-x: auto would otherwise clip a handle rendered
+  // inside a <th>). We just mark this header as the anchor.
+  return (
+    <div
+      data-resize-anchor="task-end"
+      className="flex items-center"
+      style={{ width }}
+    >
+      <SortableHeader column={column}>Task</SortableHeader>
+    </div>
+  );
+}
+
+function TaskNameCell({ name }: { name: string }) {
+  const width = useTaskWidth();
+  return (
+    <div className="truncate" style={{ width }} title={name}>
+      {name}
+    </div>
+  );
+}
+
+/**
+ * Full-height overlay that draws the Task column's resize handle. Rendered
+ * as a sibling of the data table so it can extend past the header row and
+ * span every row in the table, regardless of the table container's overflow
+ * settings.
+ */
+function TaskColResizeOverlay({
+  containerRef,
+}: {
+  containerRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const width = useTaskWidth();
+  const [pos, setPos] = useState<{ left: number; height: number } | null>(
+    null
+  );
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  // Re-measure the Task column's right edge. We need to handle four sources
+  // of position change:
+  //   1. The persisted Task width changes (drag).
+  //   2. The container's own size changes (window resize, sidebar collapse).
+  //   3. Other columns reflow because their content changed (filters,
+  //      sort, page change). The wrapper height/width may stay constant
+  //      here — only the inner cell widths shift.
+  //   4. Tab switches that remount the wrapper.
+  // ResizeObserver handles (2). useLayoutEffect after every render covers
+  // (1), (3), (4). The early-return on equal values avoids render loops.
+  const measure = () => {
+    const container = containerRef.current;
+    if (!container) return;
+    const anchor = container.querySelector<HTMLElement>(
+      '[data-resize-anchor="task-end"]'
+    );
+    const th = anchor?.closest("th");
+    if (!th) {
+      setPos((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const cRect = container.getBoundingClientRect();
+    const thRect = th.getBoundingClientRect();
+    const left = thRect.right - cRect.left;
+    const height = container.clientHeight;
+    setPos((prev) => {
+      if (prev && prev.left === left && prev.height === height) return prev;
+      return { left, height };
+    });
+  };
+
+  useLayoutEffect(measure);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(container);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+    // measure is intentionally referenced via closure; it always reads the
+    // latest containerRef.current.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containerRef]);
+
+  // Drag handling: shared with the rest of the page, persists on mouseup.
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      const drag = dragRef.current;
+      if (!drag) return;
+      taskWidthStore.set(drag.startWidth + (e.clientX - drag.startX));
+    }
+    function onUp() {
+      if (!dragRef.current) return;
+      dragRef.current = null;
+      setIsDragging(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape" || !dragRef.current) return;
+      taskWidthStore.set(dragRef.current.startWidth);
+      dragRef.current = null;
+      setIsDragging(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, []);
+
+  if (!pos) return null;
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize Task column (double-click to reset)"
+      onMouseDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragRef.current = { startX: e.clientX, startWidth: width };
+        setIsDragging(true);
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      }}
+      onDoubleClick={() => taskWidthStore.set(TASK_WIDTH_DEFAULT)}
+      className="group/resize absolute z-30 flex w-2.5 -translate-x-1/2 cursor-col-resize select-none touch-none items-stretch justify-center"
+      style={{ left: pos.left, top: 0, height: pos.height }}
+    >
+      <div
+        className={cn(
+          "pointer-events-none transition-all duration-150",
+          isDragging
+            ? "w-[2px] bg-ring"
+            : "w-px bg-transparent group-hover/resize:w-[2px] group-hover/resize:bg-ring/80"
+        )}
+      />
+    </div>
+  );
+}
+
 const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "avg_reward",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Avg Reward</SortableHeader>
-      </div>
+      <NumericHeader column={column}>Reward</NumericHeader>
     ),
     cell: ({ row }) => {
       const avgReward = row.original.avg_reward;
@@ -256,44 +590,41 @@ const columns: ColumnDef<TaskSummary>[] = [
   },
   {
     accessorKey: "task_name",
-    header: ({ column }) => (
-      <SortableHeader column={column}>Task</SortableHeader>
-    ),
+    header: ({ column }) => <TaskHeaderCell column={column} />,
+    cell: ({ row }) => <TaskNameCell name={row.original.task_name} />,
   },
   {
     accessorKey: "agent_name",
     header: ({ column }) => (
-      <SortableHeader column={column}>Agent</SortableHeader>
+      <TextHeader column={column}>Agent</TextHeader>
     ),
     cell: ({ row }) => row.original.agent_name || "-",
   },
   {
     accessorKey: "model_provider",
     header: ({ column }) => (
-      <SortableHeader column={column}>Provider</SortableHeader>
+      <TextHeader column={column}>Provider</TextHeader>
     ),
     cell: ({ row }) => row.original.model_provider || "-",
   },
   {
     accessorKey: "model_name",
     header: ({ column }) => (
-      <SortableHeader column={column}>Model</SortableHeader>
+      <TextHeader column={column}>Model</TextHeader>
     ),
     cell: ({ row }) => row.original.model_name || "-",
   },
   {
     accessorKey: "source",
     header: ({ column }) => (
-      <SortableHeader column={column}>Dataset</SortableHeader>
+      <TextHeader column={column}>Dataset</TextHeader>
     ),
     cell: ({ row }) => row.original.source || "-",
   },
   {
     accessorKey: "n_trials",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Trials</SortableHeader>
-      </div>
+      <NumericHeader column={column}>Trials</NumericHeader>
     ),
     cell: ({ row }) => {
       const { n_trials, n_completed } = row.original;
@@ -310,9 +641,7 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "n_errors",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Errors</SortableHeader>
-      </div>
+      <NumericHeader column={column}>Errors</NumericHeader>
     ),
     cell: ({ row }) => {
       const errors = row.original.n_errors;
@@ -322,9 +651,7 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "avg_cost_usd",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Cost USD</SortableHeader>
-      </div>
+      <NumericHeader column={column}>Cost</NumericHeader>
     ),
     cell: ({ row }) => {
       const cost = row.original.avg_cost_usd;
@@ -337,9 +664,7 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "avg_agent_steps",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Agent Steps</SortableHeader>
-      </div>
+      <NumericHeader column={column}>Steps</NumericHeader>
     ),
     cell: ({ row }) => {
       const value = row.original.avg_agent_steps;
@@ -352,9 +677,7 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "avg_duration_ms",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Avg Duration</SortableHeader>
-      </div>
+      <NumericHeader column={column}>Duration</NumericHeader>
     ),
     cell: ({ row }) => {
       const avgDurationMs = row.original.avg_duration_ms;
@@ -367,7 +690,7 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "exception_types",
     header: ({ column }) => (
-      <SortableHeader column={column}>Exceptions</SortableHeader>
+      <TextHeader column={column}>Exceptions</TextHeader>
     ),
     sortingFn: (a, b) => {
       const aVal = a.original.exception_types[0] ?? "";
@@ -405,9 +728,11 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "avg_input_tokens",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Uncached Input Tokens</SortableHeader>
-      </div>
+      <IconHeader
+        column={column}
+        icon={ArrowDownToLine}
+        label="Uncached Input Tokens"
+      />
     ),
     cell: ({ row }) => {
       const value = row.original.avg_input_tokens;
@@ -420,9 +745,11 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "avg_cached_input_tokens",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Cached Input Tokens</SortableHeader>
-      </div>
+      <IconHeader
+        column={column}
+        icon={Database}
+        label="Cached Input Tokens"
+      />
     ),
     cell: ({ row }) => {
       const value = row.original.avg_cached_input_tokens;
@@ -435,9 +762,11 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "avg_output_tokens",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Output Tokens</SortableHeader>
-      </div>
+      <IconHeader
+        column={column}
+        icon={ArrowUpFromLine}
+        label="Output Tokens"
+      />
     ),
     cell: ({ row }) => {
       const value = row.original.avg_output_tokens;
@@ -450,9 +779,12 @@ const columns: ColumnDef<TaskSummary>[] = [
   {
     accessorKey: "avg_peak_context_tokens",
     header: ({ column }) => (
-      <div className="text-right">
-        <SortableHeader column={column}>Peak Context</SortableHeader>
-      </div>
+      <IconHeader
+        column={column}
+        icon={Layers}
+        label="Peak Context"
+        description="Trajectory Length"
+      />
     ),
     cell: ({ row }) => {
       const value = row.original.avg_peak_context_tokens;
@@ -463,6 +795,775 @@ const columns: ColumnDef<TaskSummary>[] = [
     },
   },
 ];
+
+export type HeatmapStatKey =
+  | "avg_reward"
+  | "avg_duration_ms"
+  | "avg_cost_usd"
+  | "total_cost_usd"
+  | "avg_agent_steps"
+  | "avg_input_tokens"
+  | "avg_cached_input_tokens"
+  | "avg_output_tokens"
+  | "avg_peak_context_tokens"
+  | "n_trials"
+  | "n_errors"
+  | "exceptions";
+
+export const HEATMAP_STATS: { value: HeatmapStatKey; label: string }[] = [
+  { value: "avg_reward", label: "Avg Reward" },
+  { value: "avg_duration_ms", label: "Avg Duration" },
+  { value: "avg_cost_usd", label: "Avg Cost" },
+  { value: "total_cost_usd", label: "Total Cost" },
+  { value: "avg_agent_steps", label: "Avg Agent Steps" },
+  { value: "avg_input_tokens", label: "Avg Uncached Input" },
+  { value: "avg_cached_input_tokens", label: "Avg Cached Input" },
+  { value: "avg_output_tokens", label: "Avg Output" },
+  { value: "avg_peak_context_tokens", label: "Avg Peak Context" },
+  { value: "n_trials", label: "Trials" },
+  { value: "n_errors", label: "Errors" },
+  { value: "exceptions", label: "Exceptions" },
+];
+
+function getHeatmapNumericValue(
+  cell: JobHeatmapCell,
+  stat: HeatmapStatKey
+): number | null {
+  if (stat === "exceptions") return null;
+  return cell[stat];
+}
+
+function formatHeatmapValue(
+  cell: JobHeatmapCell,
+  stat: HeatmapStatKey
+): string {
+  if (stat === "exceptions") {
+    if (!cell.dominant_exception) return "OK";
+    return cell.n_errors > 1 ? `${cell.dominant_exception} (${cell.n_errors})` : cell.dominant_exception;
+  }
+  const value = getHeatmapNumericValue(cell, stat);
+  if (value === null) return "-";
+  if (stat === "avg_reward") return value.toFixed(2);
+  if (stat === "avg_cost_usd" || stat === "total_cost_usd") return formatCostUSD(value);
+  if (stat === "avg_duration_ms") return formatDurationMs(value);
+  if (stat.includes("tokens") || stat === "avg_peak_context_tokens") {
+    return formatTokens(value);
+  }
+  return formatCount(value);
+}
+
+function exceptionColor(exceptionType: string): string {
+  let hash = 0;
+  for (let i = 0; i < exceptionType.length; i += 1) {
+    hash = (hash * 31 + exceptionType.charCodeAt(i)) % 360;
+  }
+  return `oklch(0.72 0.14 ${hash})`;
+}
+
+function HeatmapControls({
+  searchQuery,
+  setSearchQuery,
+  agentOptions,
+  agentFilter,
+  setAgentFilter,
+  providerOptions,
+  providerFilter,
+  setProviderFilter,
+  modelOptions,
+  modelFilter,
+  setModelFilter,
+  sourceOptions,
+  sourceFilter,
+  setSourceFilter,
+  taskOptions,
+  taskFilter,
+  setTaskFilter,
+}: {
+  searchQuery: string;
+  setSearchQuery: (value: string | null) => void;
+  agentOptions: ComboboxOption[];
+  agentFilter: string[];
+  setAgentFilter: (value: string[] | null) => void;
+  providerOptions: ComboboxOption[];
+  providerFilter: string[];
+  setProviderFilter: (value: string[] | null) => void;
+  modelOptions: ComboboxOption[];
+  modelFilter: string[];
+  setModelFilter: (value: string[] | null) => void;
+  sourceOptions: ComboboxOption[];
+  sourceFilter: string[];
+  setSourceFilter: (value: string[] | null) => void;
+  taskOptions: ComboboxOption[];
+  taskFilter: string[];
+  setTaskFilter: (value: string[] | null) => void;
+}) {
+  return (
+    <>
+      <div className="col-span-2 relative">
+        <Input
+          placeholder="Search heat map..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value || null)}
+          size="lg"
+          variant="card"
+          className="peer pl-9 pr-10 shadow-none"
+        />
+        <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-border transition-colors peer-focus-visible:text-ring" />
+        {searchQuery && (
+          <button
+            type="button"
+            onClick={() => setSearchQuery(null)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+      <Combobox
+        options={agentOptions}
+        value={agentFilter}
+        onValueChange={setAgentFilter}
+        placeholder="All agents"
+        searchPlaceholder="Search agents..."
+        emptyText="No agents found."
+        variant="card"
+        className="w-full border-l-0 shadow-none"
+      />
+      <Combobox
+        options={providerOptions}
+        value={providerFilter}
+        onValueChange={setProviderFilter}
+        placeholder="All providers"
+        searchPlaceholder="Search providers..."
+        emptyText="No providers found."
+        variant="card"
+        className="w-full border-l-0 shadow-none"
+      />
+      <Combobox
+        options={modelOptions}
+        value={modelFilter}
+        onValueChange={setModelFilter}
+        placeholder="All models"
+        searchPlaceholder="Search models..."
+        emptyText="No models found."
+        variant="card"
+        className="w-full border-l-0 shadow-none"
+      />
+      <Combobox
+        options={sourceOptions}
+        value={sourceFilter}
+        onValueChange={setSourceFilter}
+        placeholder="All datasets"
+        searchPlaceholder="Search datasets..."
+        emptyText="No datasets found."
+        variant="card"
+        className="w-full border-l-0 shadow-none"
+      />
+      <Combobox
+        options={taskOptions}
+        value={taskFilter}
+        onValueChange={setTaskFilter}
+        placeholder="All tasks"
+        searchPlaceholder="Search tasks..."
+        emptyText="No tasks found."
+        variant="card"
+        className="w-full border-l-0 shadow-none"
+      />
+    </>
+  );
+}
+
+function HeatmapAxisBar({
+  rowBy,
+  setRowBy,
+  columnBy,
+  setColumnBy,
+  stat,
+  setStat,
+  trialsFilter,
+  setTrialsFilter,
+}: {
+  rowBy: JobHeatmapRowBy;
+  setRowBy: (value: string | null) => void;
+  columnBy: JobHeatmapColumnBy;
+  setColumnBy: (value: string | null) => void;
+  stat: HeatmapStatKey;
+  setStat: (value: string | null) => void;
+  trialsFilter: JobHeatmapTrialsFilter;
+  setTrialsFilter: (value: JobHeatmapTrialsFilter) => void;
+}) {
+  const rowAxisLabel =
+    rowBy === "agent"
+      ? "agents"
+      : rowBy === "model"
+        ? "models"
+        : "agent + model configs";
+  const colAxisLabel = columnBy === "dataset" ? "datasets" : "tasks";
+  return (
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b px-4 py-2.5">
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Rows</span>
+        <Select value={rowBy} onValueChange={(value) => setRowBy(value)}>
+          <SelectTrigger
+            size="sm"
+            className="h-7 border-0 bg-transparent px-2 text-xs shadow-none hover:bg-accent focus-visible:ring-0"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="config">Agent + Model</SelectItem>
+            <SelectItem value="agent">Agent</SelectItem>
+            <SelectItem value="model">Model</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Columns</span>
+        <Select value={columnBy} onValueChange={(value) => setColumnBy(value)}>
+          <SelectTrigger
+            size="sm"
+            className="h-7 border-0 bg-transparent px-2 text-xs shadow-none hover:bg-accent focus-visible:ring-0"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="task">Task</SelectItem>
+            <SelectItem value="dataset">Dataset</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Color by</span>
+        <Select value={stat} onValueChange={(value) => setStat(value)}>
+          <SelectTrigger
+            size="sm"
+            className="h-7 border-0 bg-transparent px-2 text-xs shadow-none hover:bg-accent focus-visible:ring-0"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {HEATMAP_STATS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-muted-foreground">Show</span>
+            <Select
+              value={trialsFilter}
+              onValueChange={(value) =>
+                setTrialsFilter(value as JobHeatmapTrialsFilter)
+              }
+            >
+              <SelectTrigger
+                size="sm"
+                className="h-7 border-0 bg-transparent px-2 text-xs shadow-none hover:bg-accent focus-visible:ring-0"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All trials</SelectItem>
+                <SelectItem value="non_errored">Exclude errored</SelectItem>
+                <SelectItem value="successful">
+                  Only successful (reward = 1)
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </TooltipTrigger>
+        <TooltipContent>
+          <p className="text-xs max-w-xs">
+            Errored trials count as 0 reward by default. Choose a filter to
+            drop them, or to keep only successful (reward {">="} 1) trials.
+          </p>
+        </TooltipContent>
+      </Tooltip>
+      <div className="ml-auto text-[11px] text-muted-foreground">
+        {rowAxisLabel} sorted by avg reward across {colAxisLabel}; {colAxisLabel}{" "}
+        sorted by avg reward across {rowAxisLabel}
+      </div>
+    </div>
+  );
+}
+
+const ROW_WIDTH_STORAGE_KEY = "pier.heatmap.rowLabelWidth";
+const COL_HEIGHT_STORAGE_KEY = "pier.heatmap.colHeaderHeight";
+const ROW_WIDTH_MIN = 80;
+const ROW_WIDTH_MAX = 800;
+const COL_HEIGHT_MIN = 40;
+const COL_HEIGHT_MAX = 600;
+
+function readStoredSize(key: string): number | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(key);
+  if (!raw) return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function JobHeatmap({
+  jobName,
+  data,
+  isLoading,
+  isFetching = false,
+  rowBy,
+  setRowBy,
+  columnBy,
+  setColumnBy,
+  stat,
+  setStat,
+  trialsFilter,
+  setTrialsFilter,
+}: {
+  jobName: string;
+  data: JobHeatmapData | undefined;
+  isLoading: boolean;
+  isFetching?: boolean;
+  rowBy: JobHeatmapRowBy;
+  setRowBy: (value: string | null) => void;
+  columnBy: JobHeatmapColumnBy;
+  setColumnBy: (value: string | null) => void;
+  stat: HeatmapStatKey;
+  setStat: (value: string | null) => void;
+  trialsFilter: JobHeatmapTrialsFilter;
+  setTrialsFilter: (value: JobHeatmapTrialsFilter) => void;
+}) {
+  const navigate = useNavigate();
+  const numericValues = useMemo(() => {
+    const values: number[] = [];
+    if (!data || stat === "exceptions") return values;
+    for (const rowCells of Object.values(data.cells)) {
+      for (const cell of Object.values(rowCells)) {
+        const value = getHeatmapNumericValue(cell, stat);
+        if (value !== null) values.push(value);
+      }
+    }
+    return values;
+  }, [data, stat]);
+
+  const minValue = numericValues.length > 0 ? Math.min(...numericValues) : 0;
+  const maxValue = numericValues.length > 0 ? Math.max(...numericValues) : 1;
+  const valueRange = Math.max(maxValue - minValue, 1);
+
+  const autoRowLabelWidth = useMemo(() => {
+    if (!data || data.rows.length === 0) return 220;
+    const maxChars = Math.max(...data.rows.map((row) => row.label.length));
+    return Math.min(Math.max(220, maxChars * 7 + 32), 480);
+  }, [data]);
+
+  const autoColHeaderHeight = useMemo(() => {
+    if (!data || data.columns.length === 0) return 144;
+    const maxChars = Math.max(...data.columns.map((col) => col.label.length));
+    return Math.min(Math.max(120, maxChars * 6 + 32), 400);
+  }, [data]);
+
+  const [rowLabelWidthOverride, setRowLabelWidthOverride] = useState<
+    number | null
+  >(() => readStoredSize(ROW_WIDTH_STORAGE_KEY));
+  const [colHeaderHeightOverride, setColHeaderHeightOverride] = useState<
+    number | null
+  >(() => readStoredSize(COL_HEIGHT_STORAGE_KEY));
+  const [draggingKind, setDraggingKind] = useState<"row" | "col" | null>(null);
+
+  const rowLabelWidth = rowLabelWidthOverride ?? autoRowLabelWidth;
+  const colHeaderHeight = colHeaderHeightOverride ?? autoColHeaderHeight;
+
+  const dragRef = useRef<{
+    kind: "row" | "col";
+    start: number;
+    initial: number;
+  } | null>(null);
+
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      const drag = dragRef.current;
+      if (!drag) return;
+      if (drag.kind === "row") {
+        const next = Math.min(
+          Math.max(ROW_WIDTH_MIN, drag.initial + (e.clientX - drag.start)),
+          ROW_WIDTH_MAX
+        );
+        setRowLabelWidthOverride(Math.round(next));
+      } else {
+        const next = Math.min(
+          Math.max(COL_HEIGHT_MIN, drag.initial + (e.clientY - drag.start)),
+          COL_HEIGHT_MAX
+        );
+        setColHeaderHeightOverride(Math.round(next));
+      }
+    }
+    function onUp() {
+      const drag = dragRef.current;
+      if (!drag) return;
+      try {
+        if (drag.kind === "row") {
+          const value = Math.round(rowLabelWidth);
+          window.localStorage.setItem(
+            ROW_WIDTH_STORAGE_KEY,
+            String(value)
+          );
+        } else {
+          const value = Math.round(colHeaderHeight);
+          window.localStorage.setItem(
+            COL_HEIGHT_STORAGE_KEY,
+            String(value)
+          );
+        }
+      } catch {}
+      dragRef.current = null;
+      setDraggingKind(null);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape" || !dragRef.current) return;
+      // Cancel drag without persisting the in-progress size.
+      const drag = dragRef.current;
+      if (drag.kind === "row") {
+        setRowLabelWidthOverride(
+          readStoredSize(ROW_WIDTH_STORAGE_KEY) ?? null
+        );
+      } else {
+        setColHeaderHeightOverride(
+          readStoredSize(COL_HEIGHT_STORAGE_KEY) ?? null
+        );
+      }
+      dragRef.current = null;
+      setDraggingKind(null);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [rowLabelWidth, colHeaderHeight]);
+
+  const startRowDrag = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = {
+      kind: "row",
+      start: e.clientX,
+      initial: rowLabelWidth,
+    };
+    setDraggingKind("row");
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
+  const startColDrag = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = {
+      kind: "col",
+      start: e.clientY,
+      initial: colHeaderHeight,
+    };
+    setDraggingKind("col");
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  };
+
+  const resetRowWidth = () => {
+    setRowLabelWidthOverride(null);
+    try {
+      window.localStorage.removeItem(ROW_WIDTH_STORAGE_KEY);
+    } catch {}
+  };
+
+  const resetColHeight = () => {
+    setColHeaderHeightOverride(null);
+    try {
+      window.localStorage.removeItem(COL_HEIGHT_STORAGE_KEY);
+    } catch {}
+  };
+
+  const isBusy = isLoading || isFetching;
+  const showStaleDim = isFetching && !!data;
+
+  const axisBar = (
+    <HeatmapAxisBar
+      rowBy={rowBy}
+      setRowBy={setRowBy}
+      columnBy={columnBy}
+      setColumnBy={setColumnBy}
+      stat={stat}
+      setStat={setStat}
+      trialsFilter={trialsFilter}
+      setTrialsFilter={setTrialsFilter}
+    />
+  );
+
+  // Indeterminate bar positioned `-top-px` so it sits on the axis bar's
+  // existing 1px bottom border, regardless of how tall the axis bar wraps.
+  const indicator = isBusy ? (
+    <IndeterminateBar className="-top-px" />
+  ) : null;
+
+  if (isLoading) {
+    return (
+      <div className="border bg-card">
+        {axisBar}
+        <div className="relative min-h-80">{indicator}</div>
+      </div>
+    );
+  }
+
+  if (!data || data.rows.length === 0 || data.columns.length === 0) {
+    return (
+      <div className="border bg-card">
+        {axisBar}
+        <div className="relative">
+          {indicator}
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Search />
+              </EmptyMedia>
+              <EmptyTitle>No heat map cells</EmptyTitle>
+              <EmptyDescription>
+                No trials match the current filters.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border bg-card">
+      {axisBar}
+      <div className="relative">
+        {indicator}
+      <div
+        className={cn(
+          "overflow-auto transition-opacity",
+          showStaleDim && "opacity-60"
+        )}
+      >
+        <div
+          className="grid w-fit min-w-full border-r"
+          style={{
+            gridTemplateColumns: `${rowLabelWidth}px repeat(${data.columns.length}, minmax(72px, max-content))`,
+          }}
+        >
+        <div className="sticky top-0 left-0 z-30 bg-background border-r border-b" />
+        {data.columns.map((column) => (
+          <Tooltip key={column.key}>
+            <TooltipTrigger asChild>
+              <div
+                className="sticky top-0 z-10 bg-background border-b border-r flex items-end justify-center overflow-hidden"
+                style={{ height: `${colHeaderHeight}px` }}
+              >
+                <span
+                  className="px-2 py-3 text-xs whitespace-nowrap text-muted-foreground"
+                  style={{
+                    writingMode: "sideways-lr",
+                    textOrientation: "mixed",
+                  }}
+                >
+                  {column.label}
+                </span>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className="text-xs">{column.label}</p>
+            </TooltipContent>
+          </Tooltip>
+        ))}
+        {data.rows.map((row) => (
+          <div key={row.key} className="contents">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="sticky left-0 z-10 bg-background border-r border-b flex items-center justify-end h-16 px-3 overflow-hidden">
+                  <span className="text-xs whitespace-nowrap text-right">
+                    {row.label}
+                  </span>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                <p className="text-xs">{row.label}</p>
+              </TooltipContent>
+            </Tooltip>
+            {data.columns.map((column) => {
+              const cell = data.cells[row.key]?.[column.key];
+              if (!cell) {
+                return (
+                  <div
+                    key={`${row.key}-${column.key}`}
+                    className="h-16 border-r border-b bg-muted/20"
+                  />
+                );
+              }
+
+              const numericValue = getHeatmapNumericValue(cell, stat);
+              const intensity =
+                numericValue !== null
+                  ? (numericValue - minValue) / valueRange
+                  : 0;
+              const background =
+                stat === "exceptions"
+                  ? cell.dominant_exception
+                    ? exceptionColor(cell.dominant_exception)
+                    : "transparent"
+                  : `color-mix(in oklch, var(--foreground) ${(intensity * 90 + 8).toFixed(1)}%, transparent)`;
+              const url = getHeatmapTaskUrl(jobName, cell);
+
+              return (
+                <HoverCard key={`${row.key}-${column.key}`} openDelay={150}>
+                  <HoverCardTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (url) navigate(url);
+                      }}
+                      className={cn(
+                        "group relative isolate h-16 border-r border-b flex items-center justify-center text-xs transition-opacity",
+                        url && "hover:opacity-85",
+                        !url && "cursor-default"
+                      )}
+                    >
+                      <div
+                        className="absolute inset-0"
+                        style={{ background }}
+                      />
+                      <span
+                        className={cn(
+                          "relative z-10 px-2 font-mono tabular-nums max-w-24 truncate",
+                          stat !== "exceptions" && intensity > 0.55
+                            ? "text-background"
+                            : "text-foreground"
+                        )}
+                      >
+                        {formatHeatmapValue(cell, stat)}
+                      </span>
+                    </button>
+                  </HoverCardTrigger>
+                  <HoverCardContent className="w-72 text-xs">
+                    <div className="space-y-3">
+                      <div>
+                        <div className="text-muted-foreground">Row</div>
+                        <div>{row.label}</div>
+                      </div>
+                      <div>
+                        <div className="text-muted-foreground">Column</div>
+                        <div>{column.label}</div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                        <div>
+                          <div className="text-muted-foreground">Avg Reward</div>
+                          <div className="font-mono">{cell.avg_reward?.toFixed(4) ?? "-"}</div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground">Trials</div>
+                          <div className="font-mono">{cell.n_completed}/{cell.n_trials}</div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground">Avg Duration</div>
+                          <div className="font-mono">{cell.avg_duration_ms != null ? formatDurationMs(cell.avg_duration_ms) : "-"}</div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground">Avg Cost</div>
+                          <div className="font-mono">{formatCostUSD(cell.avg_cost_usd)}</div>
+                        </div>
+                      </div>
+                      {Object.keys(cell.exception_counts).length > 0 && (
+                        <div>
+                          <div className="text-muted-foreground mb-1">Exceptions</div>
+                          <div className="space-y-1">
+                            {Object.entries(cell.exception_counts).map(([name, count]) => (
+                              <div key={name} className="flex justify-between gap-4">
+                                <span className="truncate">{name}</span>
+                                <span className="font-mono">{count}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </HoverCardContent>
+                </HoverCard>
+              );
+            })}
+          </div>
+        ))}
+        </div>
+      </div>
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize row label column (double-click to reset)"
+          aria-valuenow={Math.round(rowLabelWidth)}
+          aria-valuemin={ROW_WIDTH_MIN}
+          aria-valuemax={ROW_WIDTH_MAX}
+          tabIndex={-1}
+          onMouseDown={startRowDrag}
+          onDoubleClick={resetRowWidth}
+          className="group/resize-row absolute top-0 bottom-0 z-40 -translate-x-1/2 cursor-col-resize select-none"
+          style={{ left: `${rowLabelWidth}px`, width: 11 }}
+        >
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 transition-all duration-150",
+              draggingKind === "row"
+                ? "w-[2px] bg-ring"
+                : "w-px bg-transparent group-hover/resize-row:w-[2px] group-hover/resize-row:bg-ring/80"
+            )}
+          />
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 transition-opacity duration-150",
+              draggingKind === "row"
+                ? "w-[10px] bg-ring/15 opacity-100"
+                : "w-[10px] bg-ring/15 opacity-0 group-hover/resize-row:opacity-100"
+            )}
+          />
+        </div>
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize column header height (double-click to reset)"
+          aria-valuenow={Math.round(colHeaderHeight)}
+          aria-valuemin={COL_HEIGHT_MIN}
+          aria-valuemax={COL_HEIGHT_MAX}
+          tabIndex={-1}
+          onMouseDown={startColDrag}
+          onDoubleClick={resetColHeight}
+          className="group/resize-col absolute left-0 right-0 z-40 -translate-y-1/2 cursor-row-resize select-none"
+          style={{ top: `${colHeaderHeight}px`, height: 11 }}
+        >
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 transition-all duration-150",
+              draggingKind === "col"
+                ? "h-[2px] bg-ring"
+                : "h-px bg-transparent group-hover/resize-col:h-[2px] group-hover/resize-col:bg-ring/80"
+            )}
+          />
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-x-0 top-1/2 -translate-y-1/2 transition-opacity duration-150",
+              draggingKind === "col"
+                ? "h-[10px] bg-ring/15 opacity-100"
+                : "h-[10px] bg-ring/15 opacity-0 group-hover/resize-col:opacity-100"
+            )}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const PAGE_SIZE = 100;
 
@@ -488,10 +1589,36 @@ export default function Job() {
     "model",
     parseAsArrayOf(parseAsString).withDefault([])
   );
+  const [sourceFilter, setSourceFilter] = useQueryState(
+    "source",
+    parseAsArrayOf(parseAsString).withDefault([])
+  );
   const [taskFilter, setTaskFilter] = useQueryState(
     "task",
     parseAsArrayOf(parseAsString).withDefault([])
   );
+  const [heatmapRowBy, setHeatmapRowBy] = useQueryState(
+    "heatmap_row",
+    parseAsString.withDefault("config")
+  );
+  const [heatmapColumnBy, setHeatmapColumnBy] = useQueryState(
+    "heatmap_col",
+    parseAsString.withDefault("task")
+  );
+  const [heatmapStat, setHeatmapStat] = useQueryState(
+    "heatmap_stat",
+    parseAsString.withDefault("avg_reward")
+  );
+  const [heatmapTrialsRaw, setHeatmapTrialsRaw] = useQueryState(
+    "heatmap_trials",
+    parseAsString.withDefault("all")
+  );
+  const heatmapTrialsFilter: JobHeatmapTrialsFilter =
+    heatmapTrialsRaw === "non_errored" || heatmapTrialsRaw === "successful"
+      ? heatmapTrialsRaw
+      : "all";
+  const setHeatmapTrialsFilter = (value: JobHeatmapTrialsFilter) =>
+    setHeatmapTrialsRaw(value === "all" ? null : value);
   const [hiddenColumns, setHiddenColumns] = useQueryState(
     "hide",
     parseAsArrayOf(parseAsString).withDefault([])
@@ -502,6 +1629,7 @@ export default function Job() {
     parseAsString.withDefault("asc")
   );
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const tasksTableRef = useRef<HTMLDivElement>(null);
 
   // Convert URL params to SortingState for DataTable
   const sorting: SortingState = sortBy
@@ -519,9 +1647,10 @@ export default function Job() {
     }
   };
 
-  // Column options for the visibility toggle
+  // Column options for the visibility toggle. Labels match the (shortened)
+  // header labels so the combobox stays consistent with the table.
   const columnOptions: ComboboxOption[] = useMemo(() => [
-    { value: "avg_reward", label: "Avg Reward" },
+    { value: "avg_reward", label: "Reward" },
     { value: "task_name", label: "Task" },
     { value: "agent_name", label: "Agent" },
     { value: "model_provider", label: "Provider" },
@@ -529,14 +1658,14 @@ export default function Job() {
     { value: "source", label: "Dataset" },
     { value: "n_trials", label: "Trials" },
     { value: "n_errors", label: "Errors" },
-    { value: "avg_cost_usd", label: "Cost USD" },
-    { value: "avg_agent_steps", label: "Agent Steps" },
-    { value: "avg_duration_ms", label: "Avg Duration" },
+    { value: "avg_cost_usd", label: "Cost" },
+    { value: "avg_agent_steps", label: "Steps" },
+    { value: "avg_duration_ms", label: "Duration" },
     { value: "exception_types", label: "Exceptions" },
-    { value: "avg_input_tokens", label: "Uncached Input Tokens" },
-    { value: "avg_cached_input_tokens", label: "Cached Input Tokens" },
-    { value: "avg_output_tokens", label: "Output Tokens" },
-    { value: "avg_peak_context_tokens", label: "Peak Context" },
+    { value: "avg_input_tokens", label: "Input (uncached)" },
+    { value: "avg_cached_input_tokens", label: "Cached input" },
+    { value: "avg_output_tokens", label: "Output" },
+    { value: "avg_peak_context_tokens", label: "Peak context" },
   ], []);
 
   // Derive column visibility state from hidden columns
@@ -578,7 +1707,7 @@ export default function Job() {
   // Reset to page 1 when any filter or sort changes
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch, agentFilter, providerFilter, modelFilter, taskFilter, sortBy, sortOrder]);
+  }, [debouncedSearch, agentFilter, providerFilter, modelFilter, sourceFilter, taskFilter, sortBy, sortOrder]);
 
   const { data: job, isLoading: jobLoading } = useQuery({
     queryKey: ["job", jobName],
@@ -623,6 +1752,14 @@ export default function Job() {
     }));
   }, [filtersData?.models]);
 
+  const sourceOptions: ComboboxOption[] = useMemo(() => {
+    return (filtersData?.sources ?? []).map((opt) => ({
+      value: opt.value,
+      label: opt.value,
+      count: opt.count,
+    }));
+  }, [filtersData?.sources]);
+
   const taskOptions: ComboboxOption[] = useMemo(() => {
     return (filtersData?.tasks ?? []).map((opt) => ({
       value: opt.value,
@@ -631,7 +1768,11 @@ export default function Job() {
     }));
   }, [filtersData?.tasks]);
 
-  const { data: tasksData, isLoading: tasksLoading } = useQuery({
+  const {
+    data: tasksData,
+    isLoading: tasksLoading,
+    isPlaceholderData: tasksIsPlaceholder,
+  } = useQuery({
     queryKey: [
       "tasks",
       jobName,
@@ -640,6 +1781,7 @@ export default function Job() {
       agentFilter,
       providerFilter,
       modelFilter,
+      sourceFilter,
       taskFilter,
       sortBy,
       sortOrder,
@@ -650,6 +1792,7 @@ export default function Job() {
         agents: agentFilter.length > 0 ? agentFilter : undefined,
         providers: providerFilter.length > 0 ? providerFilter : undefined,
         models: modelFilter.length > 0 ? modelFilter : undefined,
+        sources: sourceFilter.length > 0 ? sourceFilter : undefined,
         tasks: taskFilter.length > 0 ? taskFilter : undefined,
         sortBy: sortBy || undefined,
         sortOrder: sortOrder as "asc" | "desc" | undefined,
@@ -663,7 +1806,56 @@ export default function Job() {
   const totalPages = tasksData?.total_pages ?? 0;
   const total = tasksData?.total ?? 0;
 
-  const [activeTab, setActiveTab] = useState("results");
+  const [activeTab, setActiveTab] = useQueryState(
+    "tab",
+    parseAsString.withDefault("results")
+  );
+
+  const heatmapRowValue: JobHeatmapRowBy =
+    heatmapRowBy === "agent" || heatmapRowBy === "model" ? heatmapRowBy : "config";
+  const heatmapColumnValue: JobHeatmapColumnBy =
+    heatmapColumnBy === "dataset" ? "dataset" : "task";
+  const heatmapStatValue: HeatmapStatKey = HEATMAP_STATS.some(
+    (option) => option.value === heatmapStat
+  )
+    ? (heatmapStat as HeatmapStatKey)
+    : "avg_reward";
+
+  const {
+    data: heatmapData,
+    isLoading: heatmapLoading,
+    isPlaceholderData: heatmapIsPlaceholder,
+  } = useQuery({
+    queryKey: [
+      "job-heatmap",
+      jobName,
+      debouncedSearch,
+      agentFilter,
+      providerFilter,
+      modelFilter,
+      sourceFilter,
+      taskFilter,
+      heatmapRowValue,
+      heatmapColumnValue,
+      heatmapTrialsFilter,
+    ],
+    queryFn: () =>
+      fetchJobHeatmap(jobName!, {
+        search: debouncedSearch || undefined,
+        agents: agentFilter.length > 0 ? agentFilter : undefined,
+        providers: providerFilter.length > 0 ? providerFilter : undefined,
+        models: modelFilter.length > 0 ? modelFilter : undefined,
+        sources: sourceFilter.length > 0 ? sourceFilter : undefined,
+        tasks: taskFilter.length > 0 ? taskFilter : undefined,
+        rowBy: heatmapRowValue,
+        columnBy: heatmapColumnValue,
+        trialsFilter:
+          heatmapTrialsFilter === "all" ? undefined : heatmapTrialsFilter,
+      }),
+    enabled: !!jobName && activeTab === "heatmap",
+    refetchInterval: job?.finished_at ? false : 2000,
+    placeholderData: keepPreviousData,
+  });
 
   // Handle Escape to navigate back when not on Results tab
   // (Results tab handles Escape via useKeyboardTableNavigation)
@@ -863,6 +2055,7 @@ export default function Job() {
         <div className="flex items-center justify-between bg-card border border-b-0">
           <TabsList className="border-0">
             <TabsTrigger value="results">Results</TabsTrigger>
+            <TabsTrigger value="heatmap">Heat Map</TabsTrigger>
             <TabsTrigger value="summary">Analysis</TabsTrigger>
           </TabsList>
           <div className="flex items-center gap-3 px-3 text-xs text-muted-foreground">
@@ -882,7 +2075,7 @@ export default function Job() {
           </div>
         </div>
         <TabsContent value="results">
-          <div className="grid grid-cols-7 -mb-px">
+          <div className="grid grid-cols-8 -mb-px">
             <div className="col-span-2 relative">
               <Input
                 ref={searchInputRef}
@@ -940,6 +2133,16 @@ export default function Job() {
               className="w-full border-l-0 shadow-none"
             />
             <Combobox
+              options={sourceOptions}
+              value={sourceFilter}
+              onValueChange={setSourceFilter}
+              placeholder="All datasets"
+              searchPlaceholder="Search datasets..."
+              emptyText="No datasets found."
+              variant="card"
+              className="w-full border-l-0 shadow-none"
+            />
+            <Combobox
               options={taskOptions}
               value={taskFilter}
               onValueChange={setTaskFilter}
@@ -961,18 +2164,22 @@ export default function Job() {
               multiSelectLabel="columns"
             />
           </div>
-          <DataTable
-            columns={columns}
-            data={tasks}
-            onRowClick={(task) => navigate(getTaskUrl(task, jobName!))}
-            isLoading={tasksLoading}
-            className="border-t-0"
-            highlightedIndex={highlightedIndex}
-            columnVisibility={columnVisibility}
-            sorting={sorting}
-            onSortingChange={handleSortingChange}
-            manualSorting
-          />
+          <div className="relative" ref={tasksTableRef}>
+            <DataTable
+              columns={columns}
+              data={tasks}
+              onRowClick={(task) => navigate(getTaskUrl(task, jobName!))}
+              isLoading={tasksLoading}
+              isFetching={tasksIsPlaceholder}
+              className="border-t-0"
+              highlightedIndex={highlightedIndex}
+              columnVisibility={columnVisibility}
+              sorting={sorting}
+              onSortingChange={handleSortingChange}
+              manualSorting
+            />
+            <TaskColResizeOverlay containerRef={tasksTableRef} />
+          </div>
           {totalPages > 1 && (
             <div className="grid grid-cols-3 items-center mt-4">
               <div className="text-sm text-muted-foreground">
@@ -1066,6 +2273,43 @@ export default function Job() {
               <div />
             </div>
           )}
+        </TabsContent>
+        <TabsContent value="heatmap">
+          <div className="grid grid-cols-7 -mb-px">
+            <HeatmapControls
+              searchQuery={searchQuery}
+              setSearchQuery={setSearchQuery}
+              agentOptions={agentOptions}
+              agentFilter={agentFilter}
+              setAgentFilter={setAgentFilter}
+              providerOptions={providerOptions}
+              providerFilter={providerFilter}
+              setProviderFilter={setProviderFilter}
+              modelOptions={modelOptions}
+              modelFilter={modelFilter}
+              setModelFilter={setModelFilter}
+              sourceOptions={sourceOptions}
+              sourceFilter={sourceFilter}
+              setSourceFilter={setSourceFilter}
+              taskOptions={taskOptions}
+              taskFilter={taskFilter}
+              setTaskFilter={setTaskFilter}
+            />
+          </div>
+          <JobHeatmap
+            jobName={jobName!}
+            data={heatmapData}
+            isLoading={heatmapLoading}
+            isFetching={heatmapIsPlaceholder}
+            rowBy={heatmapRowValue}
+            setRowBy={setHeatmapRowBy}
+            columnBy={heatmapColumnValue}
+            setColumnBy={setHeatmapColumnBy}
+            stat={heatmapStatValue}
+            setStat={setHeatmapStat}
+            trialsFilter={heatmapTrialsFilter}
+            setTrialsFilter={setHeatmapTrialsFilter}
+          />
         </TabsContent>
         <TabsContent value="summary">
           {summaryData?.summary ? (

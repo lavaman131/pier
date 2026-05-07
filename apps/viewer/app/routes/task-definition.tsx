@@ -3,7 +3,8 @@ import { ChevronRight, File, FileText, Folder } from "lucide-react";
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
+import { parseAsString, useQueryState } from "nuqs";
 import { z } from "zod";
 import { toast } from "sonner";
 
@@ -636,7 +637,7 @@ function FileTreeBrowser({
 export default function TaskDefinitionDetail() {
   const { taskName } = useParams<{ taskName: string }>();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [tabParam, setTabParam] = useQueryState("tab", parseAsString);
 
   useHotkeys("escape", () => navigate("/task-definitions"), {
     enableOnFormTags: false,
@@ -698,7 +699,6 @@ export default function TaskDefinitionDetail() {
 
   const fallbackTab = task.has_instruction ? "instruction" : "config";
   const validTabs = tabs.filter((t) => t.available).map((t) => t.value);
-  const tabParam = searchParams.get("tab");
   const activeTab =
     tabParam && validTabs.includes(tabParam) ? tabParam : fallbackTab;
 
@@ -772,7 +772,7 @@ export default function TaskDefinitionDetail() {
 
       <Tabs
         value={activeTab}
-        onValueChange={(v) => setSearchParams({ tab: v }, { replace: true })}
+        onValueChange={(v) => setTabParam(v)}
         className="flex-1 flex flex-col min-h-0 [&>[role=tabpanel]]:pb-8"
       >
         <TabsList className="bg-card border w-full">

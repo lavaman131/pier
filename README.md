@@ -10,27 +10,26 @@ pier run -p path/to/task --agent claude-code --env modal
 
 Pier is a fork. We wanted a smaller, more opinionated base to build on, starting with one thing Harbor couldn't do: run installed agents (Claude Code, Codex, etc.) in air-gapped tasks (`allow_internet = false`).
 
-When the agent runs *inside* the sandbox, both the install step and the inference call need the network. Pier fixes that by letting agents declare their install scripts and a network allowlist, which environments then honor when setting up the sandbox.
+When the agent runs *inside* the sandbox, both the install step and the inference call need the network. Pier fixes that by letting agents declare their install scripts and a network allowlist, which `docker` and `modal` environments honor when setting up the sandbox.
 
-More is planned from here, and pier will keep drifting from Harbor as we go.
+Since then Pier has also picked up an augmented ATIF v1.7 (strict one step per API turn, strict reasoning vs agent message separation, no fabricated assistant text, `peak_context_tokens`, `summarization_count`, `llm_call_count`, real upstream timestamps), a chat-style trajectory viewer, and `pier diagnose run` for inspecting completed trials with a fresh agent in a fresh sandbox.
 
 ## What works today
 
 - **Task format:** Harbor-compatible.
-- **Environments:** `docker`, `modal`.
-- **Agents:** `nop`, `oracle`, `claude-code`, `codex`, `gemini-cli`, `opencode`, `mini-swe-agent`.
+- **Environments:** `docker`, `modal`. Per-agent install specs and network allowlists are honored on both, so installed agents work under `allow_internet = false`.
+- **Agents:** `nop`, `oracle`, `claude-code`, `codex`, `gemini-cli`, `opencode`, `mini-swe-agent`. All emit augmented ATIF v1.7.
 - **Datasets:** local Harbor-format task directories via `-p` / `--path`.
+- **CLI:** `pier run`, `pier job`, `pier view`, `pier diagnose run`, `pier check` / `pier analyze` (vendored from Harbor)
 
-Pier does not currently resolve or download Harbor registry datasets directly. Use Harbor to export a dataset first, then point Pier at the local directory.
-
-If your tasks allow internet, or your agent runs outside the sandbox, Harbor is the broader, more mature choice and you should probably use it.
+Pier does not currently resolve or download Harbor registry datasets directly.
 
 ## Install
 
 ```bash
-uv tool install pier
+uv tool install <tbd>
 # or
-pip install pier
+pip install <tbd>
 ```
 
 ## Run
@@ -40,106 +39,78 @@ export ANTHROPIC_API_KEY=...
 pier run -p path/to/task --agent claude-code --env modal --env-file .env
 ```
 
-Run a local dataset:
+Run a local dataset, optionally a deterministic random subset:
 
 ```bash
 pier run -p path/to/dataset --agent claude-code --env modal
-```
-
-Run a deterministic random subset of a local dataset:
-
-```bash
 pier run -p path/to/dataset --n-tasks 10 --sample-seed 0
 ```
 
-### Agent Runtime Configuration
-
-Pier does not have a shared inference routing abstraction. Use
-`agent.model_name` for trial metadata, `agent.env` for runtime environment
-variables, and agent-specific `kwargs` for tool config.
-
-For gateway providers, configure the installed tool directly. For example,
-Claude Code can use an Anthropic-compatible gateway with:
-
-```yaml
-agents:
-  - name: claude-code
-    model_name: anthropic/claude-opus-4-7
-    env:
-      ANTHROPIC_AUTH_TOKEN: ${RESPAN_API_KEY}
-      ANTHROPIC_BASE_URL: https://endpoint.respan.ai/api/anthropic/
-      ANTHROPIC_CUSTOM_HEADERS: "X-Respan-Route-Provider: vertex_ai"
-    kwargs:
-      reasoning_effort: max
-```
-
-Codex should use a Codex model provider entry for Respan rather than only
-`OPENAI_BASE_URL`. The provider-prefixed model name is passed to the Codex CLI
-with `command_model_name`, while `model_name` remains Pier's trial metadata:
-
-```yaml
-agents:
-  - name: codex
-    model_name: gpt-5.5
-    env:
-      RESPAN_API_KEY: ${RESPAN_API_KEY}
-    kwargs:
-      config_toml: |
-        model_provider = "respan"
-
-        [model_providers.respan]
-        name = "Respan Gateway"
-        base_url = "https://endpoint.respan.ai/api/"
-        wire_api = "responses"
-        env_key = "RESPAN_API_KEY"
-      command_model_name: openai/gpt-5.5
-      reasoning_effort: xhigh
-```
-
-`wire_api = "responses"` keeps Codex on HTTP Responses instead of WebSockets,
-which is the transport expected by Respan. Pier's network allowlist reads URLs
-from `config_toml`, so the `base_url` above is allowlisted without any code
-changes.
-
-OpenCode exposes `opencode_config` for provider entries that Pier does not know
-about:
-
-```yaml
-agents:
-  - name: opencode
-    model_name: respan-gemini/gemini-3.1-pro-preview
-    env:
-      GEMINI_API_KEY: ${RESPAN_API_KEY}
-    kwargs:
-      opencode_config:
-        provider:
-          respan-gemini:
-            npm: ai-sdk-provider-gemini-cli
-            name: Respan Gemini
-            options:
-              authType: api-key
-              baseURL: https://endpoint.respan.ai/api/google/vertexai/
-              apiKey: "{env:GEMINI_API_KEY}"
-            models:
-              gemini-3.1-pro-preview:
-                name: Gemini 3.1 Pro Preview
-```
-
-Codex exposes `command_model_name`, `config_toml`, and `config_toml_file` kwargs
-for CLI-specific configuration. mini-swe-agent exposes `config_yaml` and
-`config_file` kwargs for mini-swe-agent config overrides.
-
-To use a Harbor registry dataset, download it with Harbor first. For example, from `~/code/harbor`:
+To use a Harbor registry dataset, download it with Harbor first, then point Pier at it:
 
 ```bash
-uv run harbor download swebenchpro -o ~/code/pier/datasets
-```
-
-Then run it with Pier:
-
-```bash
-cd ~/code/pier
+uv run --directory ~/code/harbor harbor download swebenchpro -o ~/code/pier/datasets
 uv run pier run -p datasets/swebenchpro --n-tasks 10 --sample-seed 0
 ```
 
-See `pier run --help` and `pier job --help` for everything else. Trials land under `jobs/<timestamp>/<trial_id>/`.
+Trials land under `jobs/<timestamp_or_name>/<trial_id>/`. See `pier run --help`, `pier job --help`, `pier diagnose --help`, and `pier view --help` for everything else.
+
+## Agent runtime configuration
+
+Use `agent.model_name` for trial metadata, `agent.env` for runtime env vars, and agent-specific `kwargs` for tool config. Pier's network allowlist also reads URLs out of those configs (Codex `config_toml`, OpenCode `opencode_config`, mini-swe `config_yaml`), so any base URL you set is allowlisted without code changes.
+
+A few things we've learned plumbing this through Respan and OpenRouter:
+
+**Claude Code** routes through the Anthropic face from Respan. Plan mode is disabled by default (`--disallowedTools EnterPlanMode`).
+
+```yaml
+- name: claude-code
+  model_name: claude-opus-4-7
+  env:
+    ANTHROPIC_AUTH_TOKEN: ${RESPAN_API_KEY}
+    ANTHROPIC_BASE_URL: https://endpoint.respan.ai/api/anthropic
+    ANTHROPIC_CUSTOM_HEADERS: "X-Respan-Route-Provider: vertex_ai"
+  kwargs:
+    reasoning_effort: max
+```
+
+**Codex** needs a `[model_providers.<name>]` block with `wire_api = "responses"` (not WebSockets, which Codex defaults to and Respan doesn't speak).
+
+```yaml
+- name: codex
+  model_name: openai/gpt-5.5
+  env: { RESPAN_API_KEY: ${RESPAN_API_KEY} }
+  kwargs:
+    config_toml: |
+      model_provider = "respan"
+      [model_providers.respan]
+      name = "Respan Gateway"
+      base_url = "https://endpoint.respan.ai/api/"
+      wire_api = "responses"
+      env_key = "RESPAN_API_KEY"
+    reasoning_effort: xhigh
+```
+
+**Gemini CLI**:
+
+```yaml
+- name: gemini-cli
+  model_name: gemini/gemini-3.1-pro-preview
+  env:
+    GEMINI_API_KEY: ${RESPAN_API_KEY}
+    GOOGLE_GENERATIVE_AI_API_KEY: ${RESPAN_API_KEY}
+    GEMINI_API_BASE: https://endpoint.respan.ai/api/google/vertexai/v1beta
+    GOOGLE_GEMINI_BASE_URL: https://endpoint.respan.ai/api/google/vertexai/
+```
+
+**OpenCode** uses `opencode_config` to add unknown providers or override known ones. To redirect Google to Respan, override just `options.baseURL`; to add a fully custom provider, use `opencode_config.provider.<name>` with the npm package, options, and models.
+
+**mini-swe-agent** picks a native adapter from the model-name prefix: `openai/...` → `litellm_response` (OpenAI Responses end-to-end), `openrouter/...` → `openrouter` (BYOK costs from `cost_details.upstream_inference_cost`), everything else → LiteLLM auto.
+
+```yaml
+- name: mini-swe-agent
+  model_name: openrouter/qwen/qwen3.6-plus
+  env: { OPENROUTER_API_KEY: ${OPENROUTER_API_KEY} }
+  kwargs:
+    set_cache_control: default_end
+```

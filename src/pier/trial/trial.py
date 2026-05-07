@@ -94,6 +94,25 @@ def _select_multi_step_reward(
     return _aggregate_step_rewards(step_results)
 
 
+def _agent_step_count_from_trajectory_path(trajectory_path: Path) -> int | None:
+    if not trajectory_path.exists():
+        return None
+    try:
+        trajectory = json.loads(trajectory_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    total = 0
+    found_steps = False
+    for step in trajectory.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        found_steps = True
+        if step.get("source") == "agent":
+            total += 1
+    return total if found_steps else None
+
+
 def _min_reward_failure(
     rewards: dict[str, float | int] | None,
     min_reward: float | dict[str, float],
@@ -332,6 +351,7 @@ class Trial:
                 self.result.exception_info = ExceptionInfo.from_exception(e)
 
         self.result.finished_at = datetime.now(timezone.utc)
+        self.result.n_agent_steps = self.result.agent_step_count()
 
         self._trial_paths.result_path.write_text(self.result.model_dump_json(indent=4))
 
@@ -359,13 +379,14 @@ class Trial:
         self._are_agent_logs_downloaded = True
 
     def _maybe_populate_agent_context(self, agent_result: AgentContext | None) -> None:
-        if (
-            agent_result is None
-            or not agent_result.is_empty()
-            or not isinstance(self._agent, BaseInstalledAgent)
-        ):
+        if agent_result is None or not isinstance(self._agent, BaseInstalledAgent):
             return
-        self._agent.populate_context_post_run(agent_result)
+        if agent_result.is_empty():
+            self._agent.populate_context_post_run(agent_result)
+        if agent_result.n_agent_steps is None:
+            agent_result.n_agent_steps = _agent_step_count_from_trajectory_path(
+                self._trial_paths.agent_dir / "trajectory.json"
+            )
 
     def _create_step_dirs(self, step_name: str) -> tuple[Path, Path]:
         """Create and return (agent_dir, verifier_dir) for a step."""

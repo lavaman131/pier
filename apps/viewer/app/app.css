@@ -228,3 +228,13 @@ html.dark {
 .animate-dot-1 { animation: dot-bounce 1.4s infinite ease-in-out; animation-delay: 0s; }
 .animate-dot-2 { animation: dot-bounce 1.4s infinite ease-in-out; animation-delay: 0.2s; }
 .animate-dot-3 { animation: dot-bounce 1.4s infinite ease-in-out; animation-delay: 0.4s; }
+
+/* Indeterminate progress bar (DataTable refetch indicator) */
+@keyframes indeterminate-bar {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.animate-indeterminate-bar {
+  animation: indeterminate-bar 1.4s infinite cubic-bezier(0.4, 0, 0.2, 1);
+}

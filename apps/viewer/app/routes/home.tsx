@@ -652,7 +652,7 @@ export default function Home() {
     }));
   }, [filtersData?.models]);
 
-  const { data: jobsData, isLoading } = useQuery({
+  const { data: jobsData, isLoading, isFetching } = useQuery({
     queryKey: [
       "jobs",
       page,
@@ -921,6 +921,7 @@ export default function Home() {
         columnVisibility={columnVisibility}
         getRowId={(row) => row.name}
         isLoading={isLoading || isConfigPending}
+        isFetching={isFetching}
         className="border-t-0"
         highlightedIndex={highlightedIndex}
         enableDragSelect

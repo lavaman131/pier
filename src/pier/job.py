@@ -389,6 +389,22 @@ class Job:
             metric.compute(rewards_list) for metric in self._metrics[dataset_name]
         ]
 
+    def _refresh_metrics_for_existing_trials(self) -> None:
+        """Recompute eval metrics for every evals_key seen in existing trials.
+
+        Without this, resumed runs would write an empty ``metrics`` list for
+        every eval into ``result.json`` and only repopulate keys that get a
+        fresh completion this run, hiding chips for evals_keys with no new
+        trials.
+        """
+        seen: set[str] = set()
+        for trial_result in self._existing_trial_results:
+            evals_key, dataset_name = self._evals_key_for_result(trial_result)
+            if evals_key in seen:
+                continue
+            seen.add(evals_key)
+            self._refresh_metrics_for_eval(evals_key, dataset_name)
+
     def _remove_completed_attempt_for_retry(self, trial_name: str) -> None:
         previous_result = self._previous_trial_results.pop(trial_name, None)
         if previous_result is None:
@@ -579,6 +595,7 @@ class Job:
                     n_retries=self._n_retries,
                 ),
             )
+            self._refresh_metrics_for_existing_trials()
             self._refresh_job_progress()
 
             self._job_config_path.write_text(self.config.model_dump_json(indent=4))

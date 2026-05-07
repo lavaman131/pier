@@ -1,9 +1,11 @@
 import type {
   AgentLogs,
   ArtifactsData,
-  ComparisonGridData,
   FileInfo,
   JobFilters,
+  JobHeatmapColumnBy,
+  JobHeatmapData,
+  JobHeatmapRowBy,
   JobResult,
   JobSummary,
   ModelPricing,
@@ -132,6 +134,7 @@ export interface TaskListFilters {
   agents?: string[];
   providers?: string[];
   models?: string[];
+  sources?: string[];
   tasks?: string[];
   sortBy?: string;
   sortOrder?: "asc" | "desc";
@@ -165,6 +168,11 @@ export async function fetchTasks(
       params.append("model", model);
     }
   }
+  if (filters?.sources) {
+    for (const source of filters.sources) {
+      params.append("source", source);
+    }
+  }
   if (filters?.tasks) {
     for (const task of filters.tasks) {
       params.append("task", task);
@@ -191,6 +199,93 @@ export async function fetchTaskFilters(jobName: string): Promise<TaskFilters> {
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch task filters: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export type JobHeatmapTrialsFilter = "all" | "non_errored" | "successful";
+
+export interface JobHeatmapFilters {
+  search?: string;
+  agents?: string[];
+  providers?: string[];
+  models?: string[];
+  sources?: string[];
+  tasks?: string[];
+  rowBy?: JobHeatmapRowBy;
+  columnBy?: JobHeatmapColumnBy;
+  trialsFilter?: JobHeatmapTrialsFilter;
+}
+
+function buildJobHeatmapParams(filters?: JobHeatmapFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters?.rowBy) {
+    params.set("row_by", filters.rowBy);
+  }
+  if (filters?.columnBy) {
+    params.set("column_by", filters.columnBy);
+  }
+  if (filters?.search) {
+    params.set("q", filters.search);
+  }
+  if (filters?.agents) {
+    for (const agent of filters.agents) {
+      params.append("agent", agent);
+    }
+  }
+  if (filters?.providers) {
+    for (const provider of filters.providers) {
+      params.append("provider", provider);
+    }
+  }
+  if (filters?.models) {
+    for (const model of filters.models) {
+      params.append("model", model);
+    }
+  }
+  if (filters?.sources) {
+    for (const source of filters.sources) {
+      params.append("source", source);
+    }
+  }
+  if (filters?.tasks) {
+    for (const task of filters.tasks) {
+      params.append("task", task);
+    }
+  }
+  if (filters?.trialsFilter === "non_errored") {
+    params.set("exclude_errored", "true");
+  } else if (filters?.trialsFilter === "successful") {
+    params.set("only_successful", "true");
+  }
+  return params;
+}
+
+export async function fetchJobHeatmap(
+  jobName: string,
+  filters?: JobHeatmapFilters
+): Promise<JobHeatmapData> {
+  const params = buildJobHeatmapParams(filters);
+  const response = await fetch(
+    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/heatmap?${params}`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch job heatmap: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchComparisonHeatmap(
+  jobNames: string[],
+  filters?: JobHeatmapFilters
+): Promise<JobHeatmapData> {
+  const params = buildJobHeatmapParams(filters);
+  for (const jobName of jobNames) {
+    params.append("job", jobName);
+  }
+  const response = await fetch(`${API_BASE}/api/compare/heatmap?${params}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch comparison heatmap: ${response.statusText}`);
   }
   return response.json();
 }
@@ -427,20 +522,6 @@ export async function fetchTrialLog(
     throw new Error(`Failed to fetch trial log: ${response.statusText}`);
   }
   return response.text();
-}
-
-export async function fetchComparisonData(
-  jobNames: string[]
-): Promise<ComparisonGridData> {
-  const params = new URLSearchParams();
-  for (const jobName of jobNames) {
-    params.append("job", jobName);
-  }
-  const response = await fetch(`${API_BASE}/api/compare?${params}`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch comparison data: ${response.statusText}`);
-  }
-  return response.json();
 }
 
 // Task definition API functions (task browser mode)

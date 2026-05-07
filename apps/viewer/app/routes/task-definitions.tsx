@@ -252,7 +252,7 @@ export default function TaskDefinitions() {
     [filtersData?.tags]
   );
 
-  const { data: tasksData, isLoading } = useQuery({
+  const { data: tasksData, isLoading, isFetching } = useQuery({
     queryKey: [
       "taskDefinitions",
       page,
@@ -400,6 +400,7 @@ export default function TaskDefinitions() {
         }
         getRowId={(row) => row.name}
         isLoading={isLoading || isConfigPending}
+        isFetching={isFetching}
         className="border-t-0"
         highlightedIndex={highlightedIndex}
         emptyState={

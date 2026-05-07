@@ -298,7 +298,7 @@ export default function Task() {
   const model = modelName === "_" ? undefined : modelName;
   const fullModelName = provider ? (model ? `${provider}/${model}` : provider) : model;
 
-  const { data: trialsResponse, isLoading } = useQuery({
+  const { data: trialsResponse, isLoading, isFetching } = useQuery({
     queryKey: ["trials", jobName, taskName, page, pageSize, source, agentName, fullModelName],
     queryFn: () =>
       fetchTrials(jobName!, page, pageSize, {
@@ -411,6 +411,7 @@ export default function Task() {
           )
         }
         isLoading={isLoading}
+        isFetching={isFetching}
         highlightedIndex={highlightedIndex}
       />
       {total_pages > 1 && (

@@ -337,7 +337,62 @@ export interface TaskFilters {
   agents: FilterOption[];
   providers: FilterOption[];
   models: FilterOption[];
+  sources: FilterOption[];
   tasks: FilterOption[];
+}
+
+export type JobHeatmapRowBy = "config" | "agent" | "model";
+export type JobHeatmapColumnBy = "task" | "dataset";
+
+export interface JobHeatmapRouteParams {
+  job_name: string | null;
+  source: string | null;
+  agent_name: string | null;
+  model_provider: string | null;
+  model_name: string | null;
+  task_name: string;
+}
+
+export interface JobHeatmapRow {
+  key: string;
+  label: string;
+  job_name: string | null;
+  agent_name: string | null;
+  model_provider: string | null;
+  model_name: string | null;
+}
+
+export interface JobHeatmapColumn {
+  key: string;
+  label: string;
+  source: string | null;
+  task_name: string | null;
+}
+
+export interface JobHeatmapCell {
+  row_key: string;
+  column_key: string;
+  n_trials: number;
+  n_completed: number;
+  n_errors: number;
+  avg_reward: number | null;
+  avg_duration_ms: number | null;
+  avg_input_tokens: number | null;
+  avg_cached_input_tokens: number | null;
+  avg_output_tokens: number | null;
+  avg_cost_usd: number | null;
+  total_cost_usd: number | null;
+  avg_peak_context_tokens: number | null;
+  avg_agent_steps: number | null;
+  exception_counts: Record<string, number>;
+  dominant_exception: string | null;
+  route_params: JobHeatmapRouteParams | null;
+}
+
+export interface JobHeatmapData {
+  rows: JobHeatmapRow[];
+  columns: JobHeatmapColumn[];
+  cells: Record<string, Record<string, JobHeatmapCell>>;
 }
 
 // Task definition types (for task browser mode)
@@ -375,34 +430,6 @@ export interface TaskDefinitionFilters {
   difficulties: FilterOption[];
   categories: FilterOption[];
   tags: FilterOption[];
-}
-
-export interface ComparisonTask {
-  source: string | null;
-  task_name: string;
-  key: string;
-}
-
-export interface ComparisonAgentModel {
-  job_name: string;
-  agent_name: string | null;
-  model_provider: string | null;
-  model_name: string | null;
-  key: string;
-}
-
-export interface ComparisonCell {
-  job_name: string;
-  avg_reward: number | null;
-  avg_duration_ms: number | null;
-  n_trials: number;
-  n_completed: number;
-}
-
-export interface ComparisonGridData {
-  tasks: ComparisonTask[];
-  agent_models: ComparisonAgentModel[];
-  cells: Record<string, Record<string, ComparisonCell>>; // task.key -> am.key -> cell
 }
 
 export interface ChatMessage {
