@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, FileText, Package, Route, ScrollText, Terminal } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
-import { parseAsString, useQueryState } from "nuqs";
+import { parseAsBoolean, parseAsString, useQueryState } from "nuqs";
 import { Link, useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
 import type { StepResult, TimingInfo } from "~/lib/types";
@@ -40,6 +40,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "~/components/ui/breadcrumb";
+import { Badge } from "~/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { CodeBlock } from "~/components/ui/code-block";
 import { Markdown } from "~/components/ui/markdown";
@@ -59,6 +60,8 @@ import {
   fetchModelPricing,
   fetchTrajectory,
   fetchTrial,
+  fetchTrialCritiques,
+  fetchTrialCritiqueTrajectory,
   fetchTrialFile,
   fetchTrialLog,
   fetchVerifierOutput,
@@ -70,6 +73,7 @@ import type {
   RewardDetail,
   RewardDetails,
   Step,
+  TrialCritiqueDetail,
   TrialResult,
 } from "~/lib/types";
 import { TrajectoryViewer } from "~/components/trajectory-viewer";
@@ -893,6 +897,483 @@ function AnalysisViewer({
   return <Markdown>{logs.summary}</Markdown>;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function getString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function formatBytes(size: number | null): string {
+  if (size === null) return "-";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatCritiqueStatus(status: string): string {
+  return status
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function CritiqueStatusBadge({ status }: { status: string }) {
+  const variant =
+    status === "failed"
+      ? "destructive"
+      : status === "completed" || status === "completed_with_failures"
+        ? "secondary"
+        : "outline";
+
+  return (
+    <Badge variant={variant}>
+      {formatCritiqueStatus(status)}
+    </Badge>
+  );
+}
+
+function critiqueAgentLabel(critique: TrialCritiqueDetail): string {
+  const config = critique.run_config;
+  const agent = asRecord(config?.agent);
+  const agentName = getString(agent?.name);
+  const modelName = getString(agent?.model_name);
+  if (agentName && modelName) return `${agentName} / ${modelName}`;
+  if (agentName) return agentName;
+  if (modelName) return modelName;
+  return "-";
+}
+
+function critiqueExceptionType(
+  critique: TrialCritiqueDetail
+): string | null {
+  const exceptionInfo = asRecord(critique.metadata?.exception_info);
+  return getString(exceptionInfo?.exception_type);
+}
+
+function orderCritiqueJsonKeys(
+  value: Record<string, unknown>,
+  prioritizeFirstParty: boolean
+): Record<string, unknown> {
+  if (!prioritizeFirstParty) return value;
+
+  const entries = Object.entries(value);
+  const pinnedKeys = ["rating", "tag", "tags", "feedback"];
+  const pinned = pinnedKeys
+    .filter((key) => Object.prototype.hasOwnProperty.call(value, key))
+    .map((key) => [key, value[key]] as [string, unknown]);
+  const rest = entries
+    .filter(([key]) => !pinnedKeys.includes(key))
+    .reverse();
+  return Object.fromEntries([...pinned, ...rest]);
+}
+
+function CritiqueRatingText({ rating }: { rating: string }) {
+  const className =
+    rating === "good"
+      ? "text-green-700 dark:text-green-400"
+      : rating === "bad"
+        ? "text-destructive"
+        : "";
+
+  return (
+    <span className={cn("font-mono text-sm tabular-nums", className)}>
+      {rating}
+    </span>
+  );
+}
+
+function CritiqueTagsText({ tags }: { tags: string[] }) {
+  return (
+    <div className="flex flex-wrap gap-x-2 gap-y-1">
+      {tags.map((tag, index) => (
+        <span key={tag} className="font-mono text-sm">
+          {tag}
+          {index < tags.length - 1 ? "," : ""}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function CritiqueResultSummary({
+  value,
+}: {
+  value: Record<string, unknown>;
+}) {
+  const rating = getString(value.rating);
+  const tags = critiqueResultTags(value);
+  const feedback = getString(value.feedback);
+
+  if (!rating && tags.length === 0 && !feedback) return null;
+
+  return (
+    <div className="border-x border-t bg-card px-4 py-3">
+      <div className="space-y-3">
+        {rating && (
+          <div>
+            <div className="mb-1 text-xs text-muted-foreground">Rating</div>
+            <CritiqueRatingText rating={rating} />
+          </div>
+        )}
+        {tags.length > 0 && (
+          <div className="min-w-0">
+            <div className="mb-1 text-xs text-muted-foreground">Tags</div>
+            <CritiqueTagsText tags={tags} />
+          </div>
+        )}
+        {feedback && (
+          <div className="min-w-0">
+            <div className="mb-1 text-xs text-muted-foreground">Feedback</div>
+            <Markdown className="max-w-[80ch] border-0 bg-transparent p-0">
+              {feedback}
+            </Markdown>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function critiqueResultTags(value: Record<string, unknown>): string[] {
+  const tags: string[] = [];
+
+  const add = (tag: unknown) => {
+    if (typeof tag === "string" && tag && !tags.includes(tag)) {
+      tags.push(tag);
+    }
+  };
+
+  add(value.tag);
+  if (typeof value.tags === "string") {
+    add(value.tags);
+  } else if (Array.isArray(value.tags)) {
+    for (const tag of value.tags) {
+      add(tag);
+    }
+  }
+
+  return tags;
+}
+
+function CritiqueJsonBlock({
+  value,
+  prioritizeFirstParty,
+  onPrioritizeFirstPartyChange,
+  showResultSummary = false,
+}: {
+  value: Record<string, unknown>;
+  prioritizeFirstParty: boolean;
+  onPrioritizeFirstPartyChange: (value: boolean) => void;
+  showResultSummary?: boolean;
+}) {
+  const rendered = orderCritiqueJsonKeys(value, prioritizeFirstParty);
+  const orderToggle = (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+      onClick={() => onPrioritizeFirstPartyChange(!prioritizeFirstParty)}
+    >
+      {prioritizeFirstParty ? "Original order" : "Prioritize result"}
+    </Button>
+  );
+
+  return (
+    <div>
+      {showResultSummary && <CritiqueResultSummary value={value} />}
+      <CodeBlock
+        code={JSON.stringify(rendered, null, 2)}
+        lang="json"
+        wrap
+        actions={orderToggle}
+      />
+    </div>
+  );
+}
+
+function CritiqueTrajectoryPanel({
+  jobName,
+  trialName,
+  runName,
+}: {
+  jobName: string;
+  trialName: string;
+  runName: string;
+}) {
+  const { data: trajectory, isLoading } = useQuery({
+    queryKey: ["trial-critique-trajectory", jobName, trialName, runName],
+    queryFn: () => fetchTrialCritiqueTrajectory(jobName, trialName, runName),
+  });
+
+  if (isLoading) {
+    return (
+      <div className="p-4 text-sm text-muted-foreground">
+        <LoadingDots />
+      </div>
+    );
+  }
+
+  if (!trajectory) {
+    return (
+      <Empty>
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Route />
+          </EmptyMedia>
+          <EmptyTitle>No critique trajectory</EmptyTitle>
+          <EmptyDescription>
+            No ATIF trajectory found for this critique agent run.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  return (
+    <div className="px-4 pt-4">
+      <TrajectoryViewer trajectory={trajectory} />
+    </div>
+  );
+}
+
+function CritiquesViewer({
+  jobName,
+  trialName,
+}: {
+  jobName: string;
+  trialName: string;
+}) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["trial-critiques", jobName, trialName],
+    queryFn: () => fetchTrialCritiques(jobName, trialName),
+  });
+  const [selectedRunName, setSelectedRunName] = useQueryState(
+    "critique",
+    parseAsString
+  );
+  const [reverseJsonKeys, setReverseJsonKeys] = useQueryState(
+    "critique_json_reverse",
+    parseAsBoolean.withDefault(true)
+  );
+
+  useEffect(() => {
+    if (!data || data.length === 0) {
+      setSelectedRunName(null);
+      return;
+    }
+    if (!selectedRunName || !data.some((d) => d.run_name === selectedRunName)) {
+      setSelectedRunName(data[0].run_name);
+    }
+  }, [data, selectedRunName]);
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Critiques</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="text-sm text-muted-foreground"><LoadingDots /></div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!data || data.length === 0) {
+    return (
+      <Empty className="bg-card border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <FileText />
+          </EmptyMedia>
+          <EmptyTitle>No critiques</EmptyTitle>
+          <EmptyDescription>
+            No critique run has produced an item for this trial.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  const selected =
+    data.find((d) => d.run_name === selectedRunName) ?? data[0];
+  const metadataPayload = {
+    metadata: selected.metadata,
+    run_config: selected.run_config,
+    manifest: selected.manifest,
+  };
+  const hasMetadata =
+    selected.metadata !== null ||
+    selected.run_config !== null ||
+    selected.manifest !== null;
+  const exceptionType = critiqueExceptionType(selected);
+
+  const tabs: { id: string; label: string; node: ReactNode }[] = [];
+  if (selected.markdown) {
+    tabs.push({
+      id: "notes",
+      label: "Notes",
+      node: <Markdown>{selected.markdown}</Markdown>,
+    });
+  }
+  if (selected.critique_result) {
+    tabs.push({
+      id: "json",
+      label: "Result",
+      node: (
+        <CritiqueJsonBlock
+          value={selected.critique_result}
+          prioritizeFirstParty={reverseJsonKeys}
+          onPrioritizeFirstPartyChange={setReverseJsonKeys}
+          showResultSummary
+        />
+      ),
+    });
+  }
+  tabs.push({
+    id: "trajectory",
+    label: "Trajectory",
+    node: (
+      <CritiqueTrajectoryPanel
+        jobName={jobName}
+        trialName={trialName}
+        runName={selected.run_name}
+      />
+    ),
+  });
+  if (hasMetadata) {
+    tabs.push({
+      id: "metadata",
+      label: "Metadata",
+      node: (
+        <CritiqueJsonBlock
+          value={metadataPayload}
+          prioritizeFirstParty={reverseJsonKeys}
+          onPrioritizeFirstPartyChange={setReverseJsonKeys}
+        />
+      ),
+    });
+  }
+  if (selected.files.length > 0) {
+    tabs.push({
+      id: "artifacts",
+      label: "Artifacts",
+      node: (
+        <Table>
+          <TableBody>
+            {selected.files.map((file) => (
+              <TableRow key={file.path}>
+                <TableCell className="font-mono text-xs">{file.path}</TableCell>
+                <TableCell className="text-right text-muted-foreground">
+                  {formatBytes(file.size)}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      ),
+    });
+  }
+  if (selected.log) {
+    tabs.push({
+      id: "log",
+      label: "Log",
+      node: <CodeBlock code={selected.log} lang="text" />,
+    });
+  }
+  if (selected.exception_text) {
+    tabs.push({
+      id: "exception",
+      label: "Exception",
+      node: <CodeBlock code={selected.exception_text} lang="text" />,
+    });
+  }
+
+  return (
+    <Card className="py-0 gap-0">
+      <CardContent className="p-0">
+        <div className="border-b px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-sm">{selected.run_name}</span>
+            <CritiqueStatusBadge status={selected.status} />
+            {exceptionType && (
+              <Badge variant="destructive">{exceptionType}</Badge>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span>{critiqueAgentLabel(selected)}</span>
+            <span>
+              JSON {selected.has_result_json ? "present" : "missing"}
+            </span>
+            <span>
+              Markdown {selected.has_result_md ? "present" : "missing"}
+            </span>
+            {selected.critique_uri && (
+              <span className="font-mono truncate max-w-full">
+                {selected.critique_uri.replace("file://", "")}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {data.length > 1 && (
+          <div className="border-b divide-y">
+            {data.map((critique) => (
+              <button
+                key={critique.run_name}
+                type="button"
+                className={cn(
+                  "flex w-full items-center justify-between gap-4 px-4 py-2 text-left text-sm transition-colors hover:bg-accent",
+                  critique.run_name === selected.run_name && "bg-muted"
+                )}
+                onClick={() => setSelectedRunName(critique.run_name)}
+              >
+                <span className="font-mono truncate">{critique.run_name}</span>
+                <CritiqueStatusBadge status={critique.status} />
+              </button>
+            ))}
+          </div>
+        )}
+
+        {tabs.length > 0 ? (
+          <Tabs key={selected.run_name} defaultValue={tabs[0].id}>
+            <TabsList>
+              {tabs.map((tab) => (
+                <TabsTrigger key={tab.id} value={tab.id}>
+                  {tab.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {tabs.map((tab) => (
+              <TabsContent key={tab.id} value={tab.id} className="mt-0 -mx-px">
+                {tab.node}
+              </TabsContent>
+            ))}
+          </Tabs>
+        ) : (
+          <Empty>
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <FileText />
+              </EmptyMedia>
+              <EmptyTitle>No critique result yet</EmptyTitle>
+              <EmptyDescription>
+                The critique item exists, but no result artifacts or metadata
+                have been written.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ExceptionViewer({
   jobName,
   trialName,
@@ -1690,6 +2171,7 @@ function TrialContent({
           <TabsTrigger value="trial-log">Trial Log</TabsTrigger>
           <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
           <TabsTrigger value="summary">Analysis</TabsTrigger>
+          <TabsTrigger value="critiques">Critiques</TabsTrigger>
           <TabsTrigger value="exception">Exception</TabsTrigger>
         </TabsList>
         <TabsContent value="trajectory" forceMount className="data-[state=inactive]:hidden">
@@ -1709,6 +2191,9 @@ function TrialContent({
         </TabsContent>
         <TabsContent value="summary" forceMount className="data-[state=inactive]:hidden">
           <AnalysisViewer jobName={jobName} trialName={trialName} />
+        </TabsContent>
+        <TabsContent value="critiques" forceMount className="data-[state=inactive]:hidden">
+          <CritiquesViewer jobName={jobName} trialName={trialName} />
         </TabsContent>
         <TabsContent value="exception" forceMount className="data-[state=inactive]:hidden">
           <ExceptionViewer jobName={jobName} trialName={trialName} />

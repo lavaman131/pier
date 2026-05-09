@@ -30,12 +30,14 @@ interface CodeBlockWrapperProps {
   children: React.ReactNode;
   className?: string;
   allowCopy?: boolean;
+  actions?: React.ReactNode;
 }
 
 function CodeBlockWrapper({
   children,
   className,
   allowCopy = true,
+  actions,
 }: CodeBlockWrapperProps) {
   const areaRef = useRef<HTMLDivElement>(null);
 
@@ -60,14 +62,16 @@ function CodeBlockWrapper({
         className
       )}
     >
-      {/* Copy button in top-right corner */}
-      {allowCopy && (
-        <div className="absolute top-3 right-2 z-2 backdrop-blur-lg rounded-lg text-muted-foreground">
-          <CopyButton
-            getValue={getCodeText}
-            className="rounded-md p-1.5 hover:bg-accent hover:text-accent-foreground data-checked:text-accent-foreground"
-            ariaLabel="Copy code"
-          />
+      {(actions || allowCopy) && (
+        <div className="absolute top-3 right-2 z-2 flex items-center gap-1 rounded-lg bg-card/80 text-muted-foreground backdrop-blur-lg">
+          {actions}
+          {allowCopy && (
+            <CopyButton
+              getValue={getCodeText}
+              className="rounded-md p-1.5 hover:bg-accent hover:text-accent-foreground data-checked:text-accent-foreground"
+              ariaLabel="Copy code"
+            />
+          )}
         </div>
       )}
 
@@ -76,7 +80,9 @@ function CodeBlockWrapper({
         className="max-h-[600px]"
         style={{
           // @ts-expect-error CSS custom property
-          "--padding-right": "calc(var(--spacing) * 8)",
+          "--padding-right": actions
+            ? "calc(var(--spacing) * 40)"
+            : "calc(var(--spacing) * 8)",
         }}
       >
         <div
@@ -186,9 +192,16 @@ interface CodeBlockProps {
   lang?: string;
   className?: string;
   wrap?: boolean;
+  actions?: React.ReactNode;
 }
 
-export function CodeBlock({ code, lang = "text", className, wrap = false }: CodeBlockProps) {
+export function CodeBlock({
+  code,
+  lang = "text",
+  className,
+  wrap = false,
+  actions,
+}: CodeBlockProps) {
   return (
     <div
       className={cn(
@@ -197,7 +210,7 @@ export function CodeBlock({ code, lang = "text", className, wrap = false }: Code
         className
       )}
     >
-      <CodeBlockWrapper allowCopy={true}>
+      <CodeBlockWrapper allowCopy={true} actions={actions}>
         <DynamicCodeBlock
           lang={lang}
           code={code}

@@ -1,6 +1,8 @@
 import type {
   AgentLogs,
   ArtifactsData,
+  CritiqueRunDetail,
+  CritiqueRunSummary,
   FileInfo,
   JobFilters,
   JobHeatmapColumnBy,
@@ -16,6 +18,7 @@ import type {
   TaskFilters,
   TaskSummary,
   Trajectory,
+  TrialCritiqueDetail,
   TrialResult,
   TrialSummary,
   VerifierOutput,
@@ -115,6 +118,41 @@ export async function fetchJob(jobName: string): Promise<JobResult> {
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch job: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchCritiqueRuns(
+  jobName: string,
+  page: number = 1,
+  pageSize: number = 100,
+  search?: string
+): Promise<PaginatedResponse<CritiqueRunSummary>> {
+  const params = new URLSearchParams({
+    page: page.toString(),
+    page_size: pageSize.toString(),
+  });
+  if (search) {
+    params.set("q", search);
+  }
+  const response = await fetch(
+    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/critiques?${params}`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch critique runs: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchCritiqueRun(
+  jobName: string,
+  critiqueRunName: string
+): Promise<CritiqueRunDetail> {
+  const response = await fetch(
+    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/critiques/${encodeURIComponent(critiqueRunName)}`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch critique run: ${response.statusText}`);
   }
   return response.json();
 }
@@ -339,6 +377,47 @@ export async function fetchTrial(
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch trial: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchTrialCritiques(
+  jobName: string,
+  trialName: string
+): Promise<TrialCritiqueDetail[]> {
+  const response = await fetch(
+    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/critiques`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch trial critiques: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchTrialCritique(
+  jobName: string,
+  trialName: string,
+  critiqueRunName: string
+): Promise<TrialCritiqueDetail> {
+  const response = await fetch(
+    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/critiques/${encodeURIComponent(critiqueRunName)}`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch trial critique: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchTrialCritiqueTrajectory(
+  jobName: string,
+  trialName: string,
+  critiqueRunName: string
+): Promise<Trajectory | null> {
+  const response = await fetch(
+    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/critiques/${encodeURIComponent(critiqueRunName)}/trajectory`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch critique trajectory: ${response.statusText}`);
   }
   return response.json();
 }

@@ -13,8 +13,8 @@ from pier.models.trial.config import AgentConfig, EnvironmentConfig
 from pier.models.trial.result import AgentInfo, ExceptionInfo, TimingInfo
 
 
-class DiagnosticConfig(BaseModel):
-    """Configuration for one diagnostic run over an existing Pier job."""
+class CritiqueConfig(BaseModel):
+    """Configuration for one critique run over an existing Pier job."""
 
     run_name: str
     source_job_dir: Path
@@ -32,24 +32,24 @@ class DiagnosticConfig(BaseModel):
     filter_passing: bool | None = None
 
 
-class DiagnosticItem(BaseModel):
+class CritiqueItem(BaseModel):
     source_trial_dir: Path
     source_trial_name: str
     task_dir: Path
 
 
-class DiagnosticItemResult(BaseModel):
+class CritiqueItemResult(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     source_trial_name: str
-    diagnostic_trial_name: str
+    critique_trial_name: str
     task_name: str
     task_id: LocalTaskId | GitTaskId | PackageTaskId
     task_checksum: str
     source_trial_uri: str
-    diagnostic_trial_uri: str
+    critique_trial_uri: str
     agent_info: AgentInfo | None = None
     agent_result: AgentContext | None = None
-    diagnostic_result: dict[str, Any] | None = None
+    critique_result: dict[str, Any] | None = None
     exception_info: ExceptionInfo | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -58,15 +58,15 @@ class DiagnosticItemResult(BaseModel):
     agent_execution: TimingInfo | None = None
 
 
-class DiagnosticJobResult(BaseModel):
+class CritiqueJobResult(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     run_name: str
     source_job_dir: Path
-    diagnostic_dir: Path
-    config: DiagnosticConfig
+    critique_dir: Path
+    config: CritiqueConfig
     started_at: datetime | None = None
     finished_at: datetime | None = None
-    item_results: list[DiagnosticItemResult] = Field(default_factory=list)
+    item_results: list[CritiqueItemResult] = Field(default_factory=list)
     failed_items: list[str] = Field(default_factory=list)
 
     @computed_field

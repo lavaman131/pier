@@ -4,7 +4,7 @@ import typer
 from typer import Typer
 
 from pier.cli.analyze import analyze_command, check_command
-from pier.cli.diagnose import diagnose_app
+from pier.cli.critique import critique_app
 from pier.cli.jobs import jobs_app, start
 from pier.cli.view import view_command
 
@@ -28,7 +28,7 @@ def main(
 
 
 app.add_typer(jobs_app, name="job", help="Manage jobs.")
-app.add_typer(diagnose_app, name="diagnose", help="Run sandboxed diagnostics.")
+app.add_typer(critique_app, name="critique", help="Run sandboxed critiques.")
 app.command(name="check", help="Check task quality against a rubric.")(check_command)
 app.command(name="analyze", help="Analyze trial trajectories.")(analyze_command)
 app.command(name="run", help="Start a job.")(start)

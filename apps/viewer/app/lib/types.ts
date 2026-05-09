@@ -98,6 +98,73 @@ export interface TrialSummary {
   agent_steps: number | null;
 }
 
+export interface CritiqueRunSummary {
+  name: string;
+  id: string | null;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  n_items: number;
+  n_completed_items: number;
+  n_failed_items: number;
+  agent_name: string | null;
+  model_provider: string | null;
+  model_name: string | null;
+  environment_type: string | null;
+  critique_uri: string | null;
+  has_config: boolean;
+  has_result: boolean;
+}
+
+export interface CritiqueItemSummary {
+  source_trial_name: string;
+  critique_trial_name: string | null;
+  task_name: string | null;
+  source: string | null;
+  agent_name: string | null;
+  model_provider: string | null;
+  model_name: string | null;
+  source_reward: number | null;
+  source_error_type: string | null;
+  cost_usd: number | null;
+  rating: string | null;
+  tags: string[];
+  feedback: string | null;
+  critique_values: Record<string, string | number | boolean | null>;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error_type: string | null;
+  has_metadata: boolean;
+  has_result_json: boolean;
+  has_result_md: boolean;
+}
+
+export interface CritiqueRunDetail {
+  run: CritiqueRunSummary;
+  config: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  items: CritiqueItemSummary[];
+}
+
+export interface TrialCritiqueDetail {
+  run_name: string;
+  status: string;
+  critique_uri: string | null;
+  run_config: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  critique_result: Record<string, unknown> | null;
+  markdown: string | null;
+  log: string | null;
+  exception_text: string | null;
+  files: FileInfo[];
+  manifest: unknown | null;
+  has_item_dir: boolean;
+  has_artifacts_dir: boolean;
+  has_result_json: boolean;
+  has_result_md: boolean;
+}
+
 export interface TimingInfo {
   started_at: string | null;
   finished_at: string | null;
@@ -315,6 +382,7 @@ export interface ArtifactManifestEntry {
   source: string;
   destination: string;
   type: "file" | "directory";
+  status?: string;
 }
 
 export interface ArtifactsData {

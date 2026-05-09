@@ -13,12 +13,20 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from pier.critique.runner import (
+    CRITIQUE_MARKDOWN_FILENAME,
+    CRITIQUE_RESULT_FILENAME,
+    CRITIQUE_RUNS_DIRNAME,
+)
 from pier.models.job.config import (
     JobConfig,
 )
 from pier.models.job.result import JobStats
 from pier.models.trial.result import TrialResult
 from pier.viewer.models import (
+    CritiqueItemSummary,
+    CritiqueRunDetail,
+    CritiqueRunSummary,
     EvalSummary,
     FileInfo,
     FilterOption,
@@ -36,6 +44,7 @@ from pier.viewer.models import (
     TaskDefinitionSummary,
     TaskFilters,
     TaskSummary,
+    TrialCritiqueDetail,
     TrialSummary,
 )
 from pier.viewer.scanner import JobScanner
@@ -131,6 +140,15 @@ def _agent_step_count_from_result(result: TrialResult) -> int | None:
 
 # Maximum file size to serve (1MB)
 MAX_FILE_SIZE = 1024 * 1024
+
+
+def _format_size(size_bytes: int) -> str:
+    """Format bytes as a compact human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} bytes"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
 def create_app(
@@ -592,6 +610,427 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
             raise HTTPException(status_code=404, detail=f"Step '{step}' not found")
         return step_dir
 
+    def _critiques_root(job_name: str) -> Path:
+        job_dir = _validate_job_path(job_name)
+        return (job_dir / CRITIQUE_RUNS_DIRNAME).resolve()
+
+    def _validate_critique_run_path(job_name: str, critique_run_name: str) -> Path:
+        critiques_root = _critiques_root(job_name)
+        run_dir = (critiques_root / critique_run_name).resolve()
+        if critiques_root not in run_dir.parents:
+            raise HTTPException(status_code=400, detail="Invalid critique run name")
+        if not run_dir.exists() or not run_dir.is_dir():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Critique run '{critique_run_name}' not found",
+            )
+        return run_dir
+
+    def _validate_critique_item_path(
+        job_name: str, critique_run_name: str, trial_name: str
+    ) -> Path:
+        run_dir = _validate_critique_run_path(job_name, critique_run_name)
+        item_dir = (run_dir / trial_name).resolve()
+        if run_dir not in item_dir.parents:
+            raise HTTPException(status_code=400, detail="Invalid critique item name")
+        return item_dir
+
+    def _read_json_file(path: Path) -> Any | None:
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return None
+
+    def _read_text_file(path: Path) -> str | None:
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            return "[Error reading file]"
+        if file_size > MAX_FILE_SIZE:
+            return (
+                f"[File too large: {_format_size(file_size)} "
+                f"(max {_format_size(MAX_FILE_SIZE)})]"
+            )
+        try:
+            return path.read_text()
+        except Exception:
+            return "[Error reading file]"
+
+    def _split_model_name(model_name: str | None) -> tuple[str | None, str | None]:
+        if not model_name:
+            return None, None
+        parts = model_name.split("/", 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None, model_name
+
+    def _critique_run_dirs(job_name: str) -> list[Path]:
+        critiques_root = _critiques_root(job_name)
+        if not critiques_root.exists():
+            return []
+        return sorted(
+            [d for d in critiques_root.iterdir() if d.is_dir()],
+            key=lambda d: d.name,
+            reverse=True,
+        )
+
+    def _critique_item_dirs(run_dir: Path) -> list[Path]:
+        return sorted(
+            [d for d in run_dir.iterdir() if d.is_dir()],
+            key=lambda d: d.name,
+        )
+
+    def _critique_item_status(
+        item_dir: Path,
+        metadata: dict[str, Any] | None,
+        *,
+        run_finished: bool = False,
+    ) -> str:
+        if metadata:
+            if metadata.get("exception_info") is not None:
+                return "failed"
+            if metadata.get("finished_at") is not None:
+                return "completed"
+            if metadata.get("started_at") is not None:
+                return "running"
+        if item_dir.exists():
+            if run_finished:
+                return "missing"
+            if (
+                (item_dir / "critique.log").exists()
+                or (item_dir / "agent").exists()
+                or (item_dir / "artifacts").exists()
+            ):
+                return "running"
+            return "pending"
+        return "pending"
+
+    def _critique_result_for_item(
+        item_dir: Path, metadata: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        artifacts_result = _read_json_file(
+            item_dir / "artifacts" / CRITIQUE_RESULT_FILENAME
+        )
+        if isinstance(artifacts_result, dict):
+            return artifacts_result
+        return None
+
+    def _critique_tags(result: dict[str, Any] | None) -> list[str]:
+        if not result:
+            return []
+
+        tags: list[str] = []
+
+        def add(value: Any) -> None:
+            if isinstance(value, str) and value and value not in tags:
+                tags.append(value)
+
+        add(result.get("tag"))
+        raw_tags = result.get("tags")
+        if isinstance(raw_tags, str):
+            add(raw_tags)
+        elif isinstance(raw_tags, list):
+            for tag in raw_tags:
+                add(tag)
+
+        return tags
+
+    def _critique_rating(result: dict[str, Any] | None) -> str | None:
+        if not result:
+            return None
+        rating = result.get("rating")
+        return rating if rating in {"good", "bad"} else None
+
+    def _critique_feedback(result: dict[str, Any] | None) -> str | None:
+        if not result:
+            return None
+        feedback = result.get("feedback")
+        return feedback if isinstance(feedback, str) else None
+
+    def _number_or_none(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        return float(value)
+
+    def _flatten_critique_values(
+        result: dict[str, Any] | None,
+        *,
+        max_depth: int = 2,
+    ) -> dict[str, Any]:
+        if not result:
+            return {}
+
+        values: dict[str, Any] = {}
+
+        def visit(prefix: str, value: Any, depth: int) -> None:
+            if isinstance(value, str | int | float | bool) or value is None:
+                values[prefix] = value
+                return
+            if depth >= max_depth or not isinstance(value, dict):
+                return
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    continue
+                path = f"{prefix}.{key}" if prefix else key
+                visit(path, child, depth + 1)
+
+        for key, value in result.items():
+            if isinstance(key, str):
+                visit(key, value, 0)
+        tags = _critique_tags(result)
+        if tags:
+            values["tags"] = ", ".join(tags)
+        return values
+
+    def _critique_item_summary(
+        item_dir: Path,
+        *,
+        job_name: str | None = None,
+        run_finished: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> CritiqueItemSummary:
+        metadata = metadata or _read_json_file(item_dir / "critique-metadata.json")
+        if not isinstance(metadata, dict):
+            metadata = None
+
+        artifacts_dir = item_dir / "artifacts"
+        result_json = artifacts_dir / CRITIQUE_RESULT_FILENAME
+        result_md = artifacts_dir / CRITIQUE_MARKDOWN_FILENAME
+        exception_info = metadata.get("exception_info") if metadata else None
+        error_type = (
+            exception_info.get("exception_type")
+            if isinstance(exception_info, dict)
+            else None
+        )
+        source_trial_name = (
+            str(metadata.get("source_trial_name"))
+            if metadata and metadata.get("source_trial_name") is not None
+            else item_dir.name
+        )
+        source_result = (
+            scanner.get_trial_result(job_name, source_trial_name) if job_name else None
+        )
+        model_info = source_result.agent_info.model_info if source_result else None
+        source_reward = (
+            source_result.verifier_result.rewards.get("reward")
+            if source_result
+            and source_result.verifier_result
+            and source_result.verifier_result.rewards
+            else None
+        )
+        agent_result = metadata.get("agent_result") if metadata else None
+        cost_usd = (
+            _number_or_none(agent_result.get("cost_usd"))
+            if isinstance(agent_result, dict)
+            else None
+        )
+        critique_result = _critique_result_for_item(item_dir, metadata)
+
+        return CritiqueItemSummary(
+            source_trial_name=source_trial_name,
+            critique_trial_name=(
+                str(metadata.get("critique_trial_name"))
+                if metadata and metadata.get("critique_trial_name") is not None
+                else None
+            ),
+            task_name=(
+                source_result.task_name
+                if source_result
+                else (
+                    str(metadata.get("task_name"))
+                    if metadata and metadata.get("task_name") is not None
+                    else None
+                )
+            ),
+            source=source_result.source if source_result else None,
+            agent_name=source_result.agent_info.name if source_result else None,
+            model_provider=model_info.provider if model_info else None,
+            model_name=model_info.name if model_info else None,
+            source_reward=source_reward,
+            source_error_type=(
+                source_result.exception_info.exception_type
+                if source_result and source_result.exception_info
+                else None
+            ),
+            cost_usd=cost_usd,
+            rating=_critique_rating(critique_result),
+            tags=_critique_tags(critique_result),
+            feedback=_critique_feedback(critique_result),
+            critique_values=_flatten_critique_values(critique_result),
+            status=_critique_item_status(
+                item_dir, metadata, run_finished=run_finished
+            ),
+            started_at=metadata.get("started_at") if metadata else None,
+            finished_at=metadata.get("finished_at") if metadata else None,
+            error_type=error_type,
+            has_metadata=metadata is not None,
+            has_result_json=result_json.exists(),
+            has_result_md=result_md.exists(),
+        )
+
+    def _critique_run_summary(run_dir: Path) -> CritiqueRunSummary:
+        config = _read_json_file(run_dir / "config.json")
+        result = _read_json_file(run_dir / "result.json")
+        if not isinstance(config, dict):
+            config = None
+        if not isinstance(result, dict):
+            result = None
+
+        source = result or {}
+        run_config = (
+            source.get("config") if isinstance(source.get("config"), dict) else config
+        )
+        agent = (
+            run_config.get("agent")
+            if isinstance(run_config, dict)
+            and isinstance(run_config.get("agent"), dict)
+            else {}
+        )
+        model_provider, model_name = _split_model_name(agent.get("model_name"))
+
+        environment = (
+            run_config.get("environment")
+            if isinstance(run_config, dict)
+            and isinstance(run_config.get("environment"), dict)
+            else {}
+        )
+        environment_type = environment.get("type")
+
+        failed_items = (
+            source.get("failed_items")
+            if isinstance(source.get("failed_items"), list)
+            else []
+        )
+        run_finished = result is not None and source.get("finished_at") is not None
+        item_dirs = _critique_item_dirs(run_dir)
+        item_summaries = [
+            _critique_item_summary(item_dir, run_finished=run_finished)
+            for item_dir in item_dirs
+        ]
+
+        n_completed = sum(1 for item in item_summaries if item.finished_at is not None)
+
+        filesystem_failures = sum(
+            1 for item in item_summaries if item.status == "failed"
+        )
+        root_item_count = len(failed_items)
+
+        if result is not None:
+            n_items = max(
+                int(source.get("n_items") or 0), root_item_count, len(item_dirs)
+            )
+            n_failed = max(
+                int(source.get("n_failed") or 0),
+                len(failed_items),
+                filesystem_failures,
+            )
+            status = "completed_with_failures" if n_failed else "completed"
+            if not run_finished:
+                status = "running"
+        else:
+            n_items = len(item_dirs)
+            n_failed = filesystem_failures
+            status = "running" if item_dirs else "pending"
+
+        return CritiqueRunSummary(
+            name=run_dir.name,
+            id=source.get("id") if result else None,
+            status=status,
+            started_at=source.get("started_at") if result else None,
+            finished_at=source.get("finished_at") if result else None,
+            n_items=n_items,
+            n_completed_items=n_completed,
+            n_failed_items=n_failed,
+            agent_name=agent.get("name"),
+            model_provider=model_provider,
+            model_name=model_name,
+            environment_type=environment_type,
+            critique_uri=run_dir.resolve().as_uri(),
+            has_config=config is not None,
+            has_result=result is not None,
+        )
+
+    def _critique_artifacts(artifacts_dir: Path) -> tuple[list[FileInfo], Any | None]:
+        manifest = _read_json_file(artifacts_dir / "manifest.json")
+        files: list[FileInfo] = []
+        if not artifacts_dir.exists():
+            return files, manifest
+
+        def scan_dir(dir_path: Path, relative_base: str = "") -> None:
+            try:
+                for item in sorted(dir_path.iterdir()):
+                    relative_path = (
+                        f"{relative_base}/{item.name}" if relative_base else item.name
+                    )
+                    if item.name == "manifest.json" and not relative_base:
+                        continue
+                    if item.is_dir():
+                        scan_dir(item, relative_path)
+                    else:
+                        files.append(
+                            FileInfo(
+                                path=relative_path,
+                                name=item.name,
+                                is_dir=False,
+                                size=item.stat().st_size,
+                            )
+                        )
+            except PermissionError:
+                pass
+
+        scan_dir(artifacts_dir)
+        return files, manifest
+
+    def _trial_critique_detail(
+        job_name: str, trial_name: str, critique_run_name: str
+    ) -> TrialCritiqueDetail:
+        run_dir = _validate_critique_run_path(job_name, critique_run_name)
+        item_dir = _validate_critique_item_path(
+            job_name, critique_run_name, trial_name
+        )
+        run_config = _read_json_file(run_dir / "config.json")
+        metadata = _read_json_file(item_dir / "critique-metadata.json")
+        if not isinstance(run_config, dict):
+            run_config = None
+        if not isinstance(metadata, dict):
+            metadata = None
+
+        artifacts_dir = item_dir / "artifacts"
+        result_path = artifacts_dir / CRITIQUE_RESULT_FILENAME
+        markdown_path = artifacts_dir / CRITIQUE_MARKDOWN_FILENAME
+        critique_result = _read_json_file(result_path)
+        if not isinstance(critique_result, dict):
+            critique_result = None
+
+        files, manifest = _critique_artifacts(artifacts_dir)
+        run_summary = _critique_run_summary(run_dir)
+
+        return TrialCritiqueDetail(
+            run_name=critique_run_name,
+            status=_critique_item_status(
+                item_dir,
+                metadata,
+                run_finished=run_summary.finished_at is not None,
+            ),
+            critique_uri=item_dir.resolve().as_uri() if item_dir.exists() else None,
+            run_config=run_config,
+            metadata=metadata,
+            critique_result=critique_result,
+            markdown=_read_text_file(markdown_path),
+            log=_read_text_file(item_dir / "critique.log"),
+            exception_text=_read_text_file(item_dir / "exception.txt"),
+            files=files,
+            manifest=manifest,
+            has_item_dir=item_dir.exists(),
+            has_artifacts_dir=artifacts_dir.exists(),
+            has_result_json=result_path.exists(),
+            has_result_md=markdown_path.exists(),
+        )
+
     def _get_all_job_summaries() -> list[JobSummary]:
         """Get all job summaries (used by both list_jobs and get_job_filters)."""
         job_names = scanner.list_jobs()
@@ -872,6 +1311,79 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                 )
         return {}
 
+    @app.get(
+        "/api/jobs/{job_name}/critiques",
+        response_model=PaginatedResponse[CritiqueRunSummary],
+    )
+    def list_critique_runs(
+        job_name: str,
+        page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
+        page_size: int = Query(
+            default=100, ge=1, le=100, description="Number of items per page"
+        ),
+        q: str | None = Query(default=None, description="Search query"),
+    ) -> PaginatedResponse[CritiqueRunSummary]:
+        """List critique runs stored under a source job."""
+        job_dir = _validate_job_path(job_name)
+        if not job_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Job '{job_name}' not found")
+
+        summaries = [_critique_run_summary(d) for d in _critique_run_dirs(job_name)]
+        if q:
+            query = q.lower()
+            summaries = [
+                s
+                for s in summaries
+                if query in s.name.lower()
+                or (s.agent_name and query in s.agent_name.lower())
+                or (s.model_provider and query in s.model_provider.lower())
+                or (s.model_name and query in s.model_name.lower())
+                or (s.environment_type and query in s.environment_type.lower())
+            ]
+
+        total = len(summaries)
+        total_pages = math.ceil(total / page_size) if total > 0 else 0
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_summaries = summaries[start_idx:end_idx]
+
+        return PaginatedResponse(
+            items=page_summaries,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+        )
+
+    @app.get(
+        "/api/jobs/{job_name}/critiques/{critique_run_name}",
+        response_model=CritiqueRunDetail,
+    )
+    def get_critique_run(
+        job_name: str, critique_run_name: str
+    ) -> CritiqueRunDetail:
+        """Get a critique run and its per-source-trial items."""
+        job_dir = _validate_job_path(job_name)
+        if not job_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Job '{job_name}' not found")
+
+        run_dir = _validate_critique_run_path(job_name, critique_run_name)
+        run_summary = _critique_run_summary(run_dir)
+        run_finished = run_summary.finished_at is not None
+        config = _read_json_file(run_dir / "config.json")
+        result = _read_json_file(run_dir / "result.json")
+        return CritiqueRunDetail(
+            run=run_summary,
+            config=config if isinstance(config, dict) else None,
+            result=result if isinstance(result, dict) else None,
+            items=[
+                _critique_item_summary(
+                    item_dir, job_name=job_name, run_finished=run_finished
+                )
+                for item_dir in _critique_item_dirs(run_dir)
+            ],
+        )
+
     @app.post("/api/jobs/{job_name}/summarize")
     async def summarize_job(
         job_name: str, request: SummarizeRequest
@@ -1098,8 +1610,7 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                 else None
             )
             avg_peak_context_tokens = (
-                stats["total_peak_context_tokens"]
-                / stats["peak_context_tokens_count"]
+                stats["total_peak_context_tokens"] / stats["peak_context_tokens_count"]
                 if stats["peak_context_tokens_count"] > 0
                 else None
             )
@@ -1199,7 +1710,7 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
         task: list[str] = Query(default=[], description="Filter by task names"),
         sort_by: str | None = Query(
             default=None,
-            description="Field to sort by (task_name, agent_name, model_provider, model_name, source, n_trials, n_errors, avg_duration_ms, avg_reward, avg_input_tokens, avg_cached_input_tokens, avg_output_tokens, avg_cost_usd, avg_agent_steps)",
+            description="Field to sort by (task_name, agent_name, model_provider, model_name, source, n_trials, n_errors, avg_duration_ms, avg_reward, avg_input_tokens, avg_cached_input_tokens, avg_output_tokens, avg_cost_usd, avg_peak_context_tokens, avg_agent_steps)",
         ),
         sort_order: str = Query(default="asc", description="Sort order (asc or desc)"),
     ) -> PaginatedResponse[TaskSummary]:
@@ -1299,6 +1810,14 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
             elif sort_by == "avg_cost_usd":
                 summaries.sort(
                     key=lambda s: (s.avg_cost_usd is None, s.avg_cost_usd or 0),
+                    reverse=reverse,
+                )
+            elif sort_by == "avg_peak_context_tokens":
+                summaries.sort(
+                    key=lambda s: (
+                        s.avg_peak_context_tokens is None,
+                        s.avg_peak_context_tokens or 0,
+                    ),
                     reverse=reverse,
                 )
             elif sort_by == "avg_agent_steps":
@@ -1866,6 +2385,93 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                 detail=f"Trial '{trial_name}' not found in job '{job_name}'",
             )
         return result
+
+    @app.get(
+        "/api/jobs/{job_name}/trials/{trial_name}/critiques",
+        response_model=list[TrialCritiqueDetail],
+    )
+    def list_trial_critiques(
+        job_name: str, trial_name: str
+    ) -> list[TrialCritiqueDetail]:
+        """List all critique outputs applicable to a source trial."""
+        trial_dir = _validate_trial_path(job_name, trial_name)
+        if not trial_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Trial '{trial_name}' not found in job '{job_name}'",
+            )
+
+        details: list[TrialCritiqueDetail] = []
+        for run_dir in _critique_run_dirs(job_name):
+            item_dir = run_dir / trial_name
+            if not item_dir.exists():
+                continue
+            details.append(_trial_critique_detail(job_name, trial_name, run_dir.name))
+        return details
+
+    @app.get(
+        "/api/jobs/{job_name}/trials/{trial_name}/critiques/{critique_run_name}",
+        response_model=TrialCritiqueDetail,
+    )
+    def get_trial_critique(
+        job_name: str, trial_name: str, critique_run_name: str
+    ) -> TrialCritiqueDetail:
+        """Get critique output for one source trial and critique run."""
+        trial_dir = _validate_trial_path(job_name, trial_name)
+        if not trial_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Trial '{trial_name}' not found in job '{job_name}'",
+            )
+
+        item_dir = _validate_critique_item_path(
+            job_name, critique_run_name, trial_name
+        )
+        if not item_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Critique run '{critique_run_name}' has no item "
+                    f"for trial '{trial_name}'"
+                ),
+            )
+        return _trial_critique_detail(job_name, trial_name, critique_run_name)
+
+    @app.get(
+        "/api/jobs/{job_name}/trials/{trial_name}/critiques/{critique_run_name}/trajectory"
+    )
+    def get_trial_critique_trajectory(
+        job_name: str, trial_name: str, critique_run_name: str
+    ) -> dict[str, Any] | None:
+        """Get the critique agent ATIF trajectory for one critique item."""
+        trial_dir = _validate_trial_path(job_name, trial_name)
+        if not trial_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Trial '{trial_name}' not found in job '{job_name}'",
+            )
+
+        item_dir = _validate_critique_item_path(
+            job_name, critique_run_name, trial_name
+        )
+        if not item_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Critique run '{critique_run_name}' has no item "
+                    f"for trial '{trial_name}'"
+                ),
+            )
+
+        trajectory_path = item_dir / "agent" / "trajectory.json"
+        if not trajectory_path.exists():
+            return None
+        try:
+            return json.loads(trajectory_path.read_text())
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=500, detail="Failed to parse critique trajectory.json"
+            )
 
     @app.post("/api/jobs/{job_name}/trials/{trial_name}/summarize")
     async def summarize_trial(

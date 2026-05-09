@@ -22,14 +22,14 @@ from typer import Option, Typer
 
 from pier.cli.host_env import confirm_host_env_access
 from pier.cli.utils import parse_env_vars, parse_kwargs, run_async
-from pier.diagnose.models import DiagnosticConfig
-from pier.diagnose.runner import DiagnosticRunner
+from pier.critique.models import CritiqueConfig
+from pier.critique.runner import CritiqueRunner
 from pier.models.agent.name import AgentName
 from pier.models.environment_type import EnvironmentType
 from pier.models.job.config import JobConfig
 from pier.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig
 
-diagnose_app = Typer(
+critique_app = Typer(
     no_args_is_help=True, context_settings={"help_option_names": ["-h", "--help"]}
 )
 console = Console()
@@ -54,7 +54,7 @@ def _handle_sigterm(signum, frame):
     raise KeyboardInterrupt
 
 
-@diagnose_app.command(name="run")
+@critique_app.command(name="run")
 def run_command(
     job_dir: Annotated[Path, typer.Argument(help="Path to an existing Pier job dir")],
     prompt: Annotated[
@@ -62,12 +62,12 @@ def run_command(
         Option(
             "-p",
             "--prompt",
-            help="External prompt file for the diagnostic agent.",
+            help="External prompt file for the critique agent.",
         ),
     ],
     run_name: Annotated[
         str | None,
-        Option("--name", help="Diagnostic run name. Defaults to a timestamp."),
+        Option("--name", help="Critique run name. Defaults to a timestamp."),
     ] = None,
     config_path: Annotated[
         Path | None,
@@ -76,7 +76,7 @@ def run_command(
             "--config",
             help="A job configuration path in yaml or json format. "
             "Should implement the schema of pier.models.job.config:JobConfig. "
-            "Allows for more granular control over the diagnostic configuration.",
+            "Allows for more granular control over the critique configuration.",
             rich_help_panel="Config",
             show_default=False,
         ),
@@ -297,27 +297,27 @@ def run_command(
         Option(
             "-t",
             "--trial-name",
-            help="Specific source trial name to diagnose. Can be used multiple times.",
+            help="Specific source trial name to critique. Can be used multiple times.",
             show_default=False,
         ),
     ] = None,
     limit: Annotated[
         int | None,
-        Option("--limit", help="Maximum number of selected trials to diagnose."),
+        Option("--limit", help="Maximum number of selected trials to critique."),
     ] = None,
     passing: Annotated[
         bool,
-        Option("--passing", help="Only diagnose passing source trials."),
+        Option("--passing", help="Only critique passing source trials."),
     ] = False,
     failing: Annotated[
         bool,
-        Option("--failing", help="Only diagnose failing source trials."),
+        Option("--failing", help="Only critique failing source trials."),
     ] = False,
     overwrite: Annotated[
         bool,
         Option(
             "--overwrite",
-            help="Rerun diagnostics even if diagnostic metadata already exists.",
+            help="Rerun critiques even if critique metadata already exists.",
         ),
     ] = False,
     yes: Annotated[
@@ -338,7 +338,7 @@ def run_command(
         ),
     ] = None,
 ):
-    """Run sandboxed diagnostics over completed trials in a Pier job."""
+    """Run sandboxed critiques over completed trials in a Pier job."""
     if passing and failing:
         raise ValueError("Cannot use both --passing and --failing.")
     if not prompt.exists():
@@ -429,7 +429,7 @@ def run_command(
     if environment_kwargs is not None:
         config.environment.kwargs.update(parse_kwargs(environment_kwargs))
 
-    cfg = DiagnosticConfig(
+    cfg = CritiqueConfig(
         run_name=run_name or datetime.now().strftime("%Y-%m-%d__%H-%M-%S"),
         source_job_dir=job_dir,
         prompt_path=prompt,
@@ -447,7 +447,7 @@ def run_command(
     )
 
     async def _run_job():
-        runner = DiagnosticRunner(cfg)
+        runner = CritiqueRunner(cfg)
         selected_items = runner.collect_items()
         confirm_host_env_access(
             task_configs=[TaskConfig(path=item.task_dir) for item in selected_items],
@@ -466,7 +466,7 @@ def run_command(
             MofNCompleteColumn(),
             TimeElapsedColumn(),
         ) as progress:
-            task_id = progress.add_task("Running diagnostics...", total=None)
+            task_id = progress.add_task("Running critiques...", total=None)
 
             def _set_total(total: int) -> None:
                 progress.update(task_id, total=total)
@@ -479,11 +479,11 @@ def run_command(
             )
 
         console.print()
-        console.print("[bold]Diagnostic Run[/bold]")
+        console.print("[bold]Critique Run[/bold]")
         console.print(
             f"Total runtime: {_format_duration(result.started_at, result.finished_at)}"
         )
-        console.print(f"Results written to {result.diagnostic_dir / 'result.json'}")
+        console.print(f"Results written to {result.critique_dir / 'result.json'}")
         console.print(f"Items: {len(result.item_results)}")
         console.print(f"Failures: {result.n_failed}")
         if result.failed_items:

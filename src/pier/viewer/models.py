@@ -1,5 +1,7 @@
 """API response models for the viewer."""
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any, Generic, TypeVar
 from uuid import UUID
@@ -91,6 +93,81 @@ class TrialSummary(BaseModel):
     cost_usd: float | None = None
     peak_context_tokens: int | None = None
     agent_steps: int | None = None
+
+
+class CritiqueRunSummary(BaseModel):
+    """Summary of a critique run stored under a source job."""
+
+    name: str
+    id: UUID | None = None
+    status: str = "pending"
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    n_items: int = 0
+    n_completed_items: int = 0
+    n_failed_items: int = 0
+    agent_name: str | None = None
+    model_provider: str | None = None
+    model_name: str | None = None
+    environment_type: str | None = None
+    critique_uri: str | None = None
+    has_config: bool = False
+    has_result: bool = False
+
+
+class CritiqueItemSummary(BaseModel):
+    """Summary of one source-trial critique item."""
+
+    source_trial_name: str
+    critique_trial_name: str | None = None
+    task_name: str | None = None
+    source: str | None = None
+    agent_name: str | None = None
+    model_provider: str | None = None
+    model_name: str | None = None
+    source_reward: float | None = None
+    source_error_type: str | None = None
+    cost_usd: float | None = None
+    rating: str | None = None
+    tags: list[str] = []
+    feedback: str | None = None
+    critique_values: dict[str, Any] = {}
+    status: str = "pending"
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_type: str | None = None
+    has_metadata: bool = False
+    has_result_json: bool = False
+    has_result_md: bool = False
+
+
+class CritiqueRunDetail(BaseModel):
+    """Full viewer payload for a critique run."""
+
+    run: CritiqueRunSummary
+    config: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    items: list[CritiqueItemSummary] = []
+
+
+class TrialCritiqueDetail(BaseModel):
+    """Critique data applicable to a specific source trial."""
+
+    run_name: str
+    status: str = "pending"
+    critique_uri: str | None = None
+    run_config: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    critique_result: dict[str, Any] | None = None
+    markdown: str | None = None
+    log: str | None = None
+    exception_text: str | None = None
+    files: list[FileInfo] = []
+    manifest: Any | None = None
+    has_item_dir: bool = False
+    has_artifacts_dir: bool = False
+    has_result_json: bool = False
+    has_result_md: bool = False
 
 
 class ModelPricing(BaseModel):

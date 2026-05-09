@@ -12,7 +12,7 @@ Pier is a fork. We wanted a smaller, more opinionated base to build on, starting
 
 When the agent runs *inside* the sandbox, both the install step and the inference call need the network. Pier fixes that by letting agents declare their install scripts and a network allowlist, which `docker` and `modal` environments honor when setting up the sandbox.
 
-Since then Pier has also picked up an augmented ATIF v1.7 (strict one step per API turn, strict reasoning vs agent message separation, no fabricated assistant text, `peak_context_tokens`, `summarization_count`, `llm_call_count`, real upstream timestamps), a chat-style trajectory viewer, and `pier diagnose run` for inspecting completed trials with a fresh agent in a fresh sandbox.
+Since then Pier has also picked up an augmented ATIF v1.7 (strict one step per API turn, strict reasoning vs agent message separation, no fabricated assistant text, `peak_context_tokens`, `summarization_count`, `llm_call_count`, real upstream timestamps), a chat-style trajectory viewer, and `pier critique run` for inspecting completed trials with a fresh agent in a fresh sandbox.
 
 ## What works today
 
@@ -20,7 +20,7 @@ Since then Pier has also picked up an augmented ATIF v1.7 (strict one step per A
 - **Environments:** `docker`, `modal`. Per-agent install specs and network allowlists are honored on both, so installed agents work under `allow_internet = false`.
 - **Agents:** `nop`, `oracle`, `claude-code`, `codex`, `gemini-cli`, `opencode`, `mini-swe-agent`. All emit augmented ATIF v1.7.
 - **Datasets:** local Harbor-format task directories via `-p` / `--path`.
-- **CLI:** `pier run`, `pier job`, `pier view`, `pier diagnose run`, `pier check` / `pier analyze` (vendored from Harbor)
+- **CLI:** `pier run`, `pier job`, `pier view`, `pier critique run`, `pier check` / `pier analyze` (vendored from Harbor)
 
 Pier does not currently resolve or download Harbor registry datasets directly.
 
@@ -53,7 +53,7 @@ uv run --directory ~/code/harbor harbor download swebenchpro -o ~/code/pier/data
 uv run pier run -p datasets/swebenchpro --n-tasks 10 --sample-seed 0
 ```
 
-Trials land under `jobs/<timestamp_or_name>/<trial_id>/`. See `pier run --help`, `pier job --help`, `pier diagnose --help`, and `pier view --help` for everything else.
+Trials land under `jobs/<timestamp_or_name>/<trial_id>/`. See `pier run --help`, `pier job --help`, `pier critique --help`, and `pier view --help` for everything else.
 
 ## Agent runtime configuration
 

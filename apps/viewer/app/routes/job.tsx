@@ -2190,6 +2190,11 @@ export default function Job() {
           </div>
           <div className="flex flex-col justify-between items-start xl:items-end gap-6">
             <div className="flex items-center gap-2">
+              <Button variant="secondary" asChild>
+                <Link to={`/jobs/${encodeURIComponent(jobName!)}/critiques`}>
+                  Critiques
+                </Link>
+              </Button>
               <Button
                 variant={isDeleting ? "destructive" : "secondary"}
                 onClick={handleDelete}
