@@ -33,6 +33,13 @@ uv tool install <tbd>
 pip install <tbd>
 ```
 
+For local development, use the pinned Python version and dev dependency group:
+
+```bash
+uv sync --dev
+uv run pytest tests
+```
+
 ## Run
 
 ```bash
@@ -55,6 +62,54 @@ uv run pier run -p datasets/swebenchpro --n-tasks 10 --sample-seed 0
 ```
 
 Trials land under `jobs/<timestamp_or_name>/<trial_id>/`. See `pier run --help`, `pier job --help`, `pier critique --help`, and `pier view --help` for everything else.
+
+## Job configs
+
+Use CLI flags for quick one-off runs and small overrides:
+
+```bash
+pier run -p examples/tasks/hello-world --agent claude-code --env docker
+```
+
+Use a job config when the run needs to be reproducible, uses multiple agents, has agent-specific runtime settings, samples a local dataset, or would otherwise turn into a long command:
+
+```bash
+export RESPAN_API_KEY=...
+uv run pier run --config configs/respan-dual-agent-local-task.yaml --yes
+```
+
+Config files can live anywhere you can pass to `--config`; `configs/` is just a conventional place for shared examples. `pier run --config` and `pier critique run --config` currently accept `.yaml` and `.json` files. `.yml` is not supported today.
+
+A job config implements `pier.models.job.config.JobConfig`. The common top-level shape is:
+
+```yaml
+job_name: my-job
+jobs_dir: jobs
+n_attempts: 1
+n_concurrent_trials: 1
+environment:
+  type: docker        # or modal
+agents:
+  - name: claude-code
+    model_name: claude-opus-4-7
+    env:
+      ANTHROPIC_AUTH_TOKEN: ${RESPAN_API_KEY}
+    kwargs:
+      reasoning_effort: max
+tasks:
+  - path: path/to/one-task
+# Or, for a directory containing many task directories:
+# datasets:
+#   - path: path/to/local-dataset
+#     n_tasks: 10
+#     sample_seed: 0
+```
+
+For local Harbor directories, use `tasks:` when each entry is one task directory containing `task.toml`, `instruction.md`, `environment/`, and `tests/`. Use `datasets:` when each entry is a directory of task directories; dataset configs can filter with `task_names` / `exclude_task_names` and sample with `n_tasks` / `sample_seed`.
+
+Runtime secrets should not be committed. Put `${VAR_NAME}` placeholders in config files, then provide the real values in your shell or with `--env-file`. Pier resolves those placeholders when constructing the agent or environment, and serializes known sensitive env values back as templates so job artifacts do not leak real keys.
+
+See `configs/README.md` and `configs/respan-dual-agent-local-task.yaml` for a runnable Respan-backed Claude Code + Codex example.
 
 ## Agent runtime configuration
 
