@@ -34,6 +34,11 @@ _ENVIRONMENT_REGISTRY: dict[EnvironmentType, _EnvEntry] = {
         "ModalEnvironment",
         "modal",
     ),
+    EnvironmentType.DAYTONA: _EnvEntry(
+        "pier.environments.daytona",
+        "DaytonaEnvironment",
+        "daytona",
+    ),
 }
 
 
