@@ -4,8 +4,7 @@
 #   export RESPAN_API_KEY=...
 #   uv run pier run --config configs/respan-dual-agent-local-task.yaml --yes
 #
-# This uses Pier's checked-in hello-world task so the config is reusable. Replace
-# the path below with your own Harbor-format task directory when needed.
+# This uses Pier's checked-in hello-world task so the config is portable.
 
 job_name: respan-dual-agent-local-task
 jobs_dir: jobs

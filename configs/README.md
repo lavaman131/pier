@@ -1,6 +1,6 @@
 # Pier job configs
 
-This directory contains reusable example job configs. They are intended to be small, runnable references for `pier run --config ...`; keep local paths portable and never commit real API keys.
+This directory contains reusable example job configs for `pier run --config ...`. Keep paths portable and never commit real API keys.
 
 Run the Respan dual-agent example from the repository root:
 
@@ -9,9 +9,9 @@ export RESPAN_API_KEY='...'
 uv run pier run --config configs/respan-dual-agent-local-task.yaml --yes
 ```
 
-The config targets `examples/tasks/hello-world`, a single Harbor-format task included in this repository. To run your own local task, replace that entry under `tasks:` with a path to a directory containing `task.toml`, `instruction.md`, `environment/`, and `tests/`.
+The config targets `examples/tasks/hello-world`, a single Harbor-format task included in this repository. A `tasks:` entry points at a directory containing `task.toml`, `instruction.md`, `environment/`, and `tests/`.
 
-Use `datasets:` instead when the path is a directory of multiple Harbor task directories. Dataset entries can also filter and sample tasks, for example:
+A `datasets:` entry points at a directory of multiple Harbor task directories. Dataset entries can filter and sample tasks, for example:
 
 ```yaml
 datasets:

@@ -38,7 +38,4 @@ known-first-party = ["pier"]
 
 
 [dependency-groups]
-dev = [
-    "pytest>=9.0.3",
-    "ruff>=0.5",
-]
+dev = ["ruff>=0.5"]
