@@ -1,6 +1,6 @@
 [project]
 name = "datacurve-pier"
-version = "0.1.0"
+version = "0.2.0"
 description = "A framework for running coding agents in sandboxed environments and keeping full trajectories for analysis."
 readme = "README.md"
 license = "Apache-2.0"
@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
     "anthropic>=0.97.0",
     "anyio>=4.13.0",
+    "botocore>=1.43.11",
     "claude-agent-sdk>=0.1.17",
     "daytona>=0.121.0",
     "fastapi>=0.128.0",
