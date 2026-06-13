@@ -126,7 +126,7 @@ import type {
   JobHeatmapRowBy,
   TaskSummary,
 } from "~/lib/types";
-import { cn } from "~/lib/utils";
+import { cn, primaryMetricEntry } from "~/lib/utils";
 
 function CopyableValue({ value }: { value: string }) {
   const handleClick = async () => {
@@ -1821,7 +1821,7 @@ export default function Job() {
             {evalEntries.map(([key, evalItem]) => {
               const firstMetric = evalItem.metrics[0];
               if (!firstMetric) return null;
-              const [metricName, metricValue] = Object.entries(firstMetric)[0];
+              const [metricName, metricValue] = primaryMetricEntry(firstMetric);
               const formatted =
                 typeof metricValue === "number"
                   ? metricValue.toFixed(2)
@@ -1841,7 +1841,7 @@ export default function Job() {
                   <TooltipContent>
                     <ul className="space-y-0.5">
                       {evalItem.metrics.map((metric, i) => {
-                        const [name, val] = Object.entries(metric)[0];
+                        const [name, val] = primaryMetricEntry(metric);
                         const valStr =
                           typeof val === "number" ? val.toFixed(2) : val;
                         return (
