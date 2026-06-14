@@ -152,6 +152,7 @@ def _extract_reasoning_effort(result: TrialResult) -> str | None:
         on Gemini)
       - ``model_kwargs.output_config.effort`` (mini-swe on Anthropic)
       - ``model_kwargs.reasoning.effort`` (mini-swe on OpenAI)
+      - ``model_kwargs.thinkingConfig.thinkingLevel`` (mini-swe on Vertex Gemini)
     Only explicitly configured efforts are surfaced; an unset value reports as
     missing rather than inferring agent-specific defaults.
     """
@@ -167,6 +168,13 @@ def _extract_reasoning_effort(result: TrialResult) -> str | None:
             outer = model_kwargs.get(outer_key)
             if isinstance(outer, dict) and outer.get("effort") is not None:
                 return str(outer["effort"])
+        for outer_key in ("thinkingConfig", "thinking_config"):
+            outer = model_kwargs.get(outer_key)
+            if isinstance(outer, dict):
+                for effort_key in ("thinkingLevel", "thinking_level"):
+                    value = outer.get(effort_key)
+                    if value is not None:
+                        return str(value).lower()
 
     return None
 
