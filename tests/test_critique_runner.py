@@ -1,11 +1,17 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from pier.models.job.config import RetryConfig
 from pier.models.job.lock import JobLock, TaskLock, TrialLock
 from pier.critique.models import CritiqueConfig, CritiqueItemResult, CritiqueJobResult
-from pier.critique.runner import CritiquePaths, CritiqueRunner, CritiqueTrial
+from pier.critique.runner import (
+    CRITIQUE_ARTIFACTS_DIRNAME,
+    CritiquePaths,
+    CritiqueRunner,
+    CritiqueTrial,
+)
 from pier.models.task.id import LocalTaskId
 from pier.models.trial.config import (
     AgentConfig,
@@ -14,6 +20,7 @@ from pier.models.trial.config import (
     TrialConfig,
     VerifierConfig,
 )
+from pier.models.trial.paths import EnvironmentPaths
 from pier.models.trial.result import AgentInfo, ExceptionInfo, TrialResult
 
 
@@ -239,6 +246,52 @@ def test_cached_item_result_reads_artifact_as_source_of_truth(tmp_path):
     assert result.critique_result == artifact
     assert CritiqueRunner._should_reuse_cached_result(result)
     assert "critique_result" not in json.loads(paths.result_path.read_text())
+
+
+def test_render_instruction_exposes_critique_artifacts_dir(tmp_path):
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("Artifacts: {critique_artifacts_dir}", encoding="utf-8")
+
+    trial = object.__new__(CritiqueTrial)
+    trial.config = CritiqueConfig(
+        run_name="run",
+        source_job_dir=tmp_path / "job",
+        prompt_path=prompt_path,
+        agent=AgentConfig(),
+    )
+    trial.item = SimpleNamespace(source_trial_name="trial")
+    trial._task = SimpleNamespace(name="task")
+    trial._environment = SimpleNamespace(env_paths=EnvironmentPaths())
+
+    instruction = CritiqueTrial._render_instruction(trial)
+
+    assert "{critique_artifacts_dir}" not in instruction
+    assert f"/logs/artifacts/{CRITIQUE_ARTIFACTS_DIRNAME}" in instruction
+    assert "will be saved with the critique item" in instruction
+
+
+def test_write_artifacts_manifest_records_critique_artifacts_dir(tmp_path):
+    paths = CritiquePaths(tmp_path / "trial")
+    paths.mkdir()
+    critique_artifacts_dir = paths.artifacts_dir / CRITIQUE_ARTIFACTS_DIRNAME
+    critique_artifacts_dir.mkdir()
+    (critique_artifacts_dir / "notes.txt").write_text("ok", encoding="utf-8")
+
+    trial = object.__new__(CritiqueTrial)
+    trial._critique_paths = paths
+    trial._environment = SimpleNamespace(env_paths=EnvironmentPaths())
+
+    CritiqueTrial._write_artifacts_manifest(trial)
+
+    manifest = json.loads(paths.artifacts_manifest_path.read_text(encoding="utf-8"))
+    artifact_entry = next(
+        entry
+        for entry in manifest
+        if entry["destination"] == f"artifacts/{CRITIQUE_ARTIFACTS_DIRNAME}"
+    )
+    assert artifact_entry["source"] == f"/logs/artifacts/{CRITIQUE_ARTIFACTS_DIRNAME}"
+    assert artifact_entry["type"] == "directory"
+    assert artifact_entry["status"] == "ok"
 
 
 def test_resume_uses_current_prompt_path(tmp_path):

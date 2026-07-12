@@ -624,8 +624,27 @@ export async function fetchTrialCritiqueTrajectory(
   return response.json();
 }
 
+export async function fetchTrialCritiqueArtifactFile(
+  jobName: string,
+  trialName: string,
+  critiqueRunName: string,
+  filePath: string
+): Promise<string> {
+  const response = await fetch(
+    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/critiques/${encodeURIComponent(critiqueRunName)}/artifacts/${encodeFilePath(filePath)}`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch critique artifact: ${response.statusText}`);
+  }
+  return response.text();
+}
+
 function stepQuery(step?: string | null): string {
   return step ? `?step=${encodeURIComponent(step)}` : "";
+}
+
+function encodeFilePath(filePath: string): string {
+  return filePath.split("/").map(encodeURIComponent).join("/");
 }
 
 export async function fetchTrajectory(
@@ -677,7 +696,7 @@ export async function fetchTrialFile(
   step?: string | null
 ): Promise<string> {
   const response = await fetch(
-    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/files/${filePath}${stepQuery(step)}`
+    `${API_BASE}/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/files/${encodeFilePath(filePath)}${stepQuery(step)}`
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch file: ${response.statusText}`);

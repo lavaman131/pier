@@ -61,6 +61,7 @@ import {
   fetchTrajectory,
   fetchTrial,
   fetchTrialCritiques,
+  fetchTrialCritiqueArtifactFile,
   fetchTrialCritiqueTrajectory,
   fetchTrialFile,
   fetchTrialLog,
@@ -68,7 +69,7 @@ import {
   summarizeTrial,
 } from "~/lib/api";
 import type {
-  ArtifactManifestEntry,
+  FileInfo,
   RewardCriterion,
   RewardDetail,
   RewardDetails,
@@ -907,13 +908,6 @@ function getString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function formatBytes(size: number | null): string {
-  if (size === null) return "-";
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function formatCritiqueStatus(status: string): string {
   return status
     .split("_")
@@ -1141,6 +1135,154 @@ function CritiqueTrajectoryPanel({
   );
 }
 
+function CritiqueArtifactFileContent({
+  jobName,
+  trialName,
+  runName,
+  filePath,
+  lang,
+}: {
+  jobName: string;
+  trialName: string;
+  runName: string;
+  filePath: string;
+  lang: string;
+}) {
+  const { data: content, isLoading } = useQuery({
+    queryKey: [
+      "trial-critique-artifact",
+      jobName,
+      trialName,
+      runName,
+      filePath,
+    ],
+    queryFn: () =>
+      fetchTrialCritiqueArtifactFile(jobName, trialName, runName, filePath),
+  });
+
+  if (isLoading) {
+    return (
+      <div className="p-4 text-sm text-muted-foreground">
+        <LoadingDots />
+      </div>
+    );
+  }
+
+  return <CodeBlock code={content ?? ""} lang={lang} />;
+}
+
+function CritiqueArtifactImageContent({
+  jobName,
+  trialName,
+  runName,
+  filePath,
+}: {
+  jobName: string;
+  trialName: string;
+  runName: string;
+  filePath: string;
+}) {
+  const [error, setError] = useState(false);
+  const src = `/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/critiques/${encodeURIComponent(runName)}/artifacts/${encodeArtifactPath(filePath)}`;
+
+  if (error) {
+    return (
+      <div className="p-4 text-sm text-muted-foreground">
+        Failed to load image: {filePath}
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4">
+      <img
+        src={src}
+        alt={filePath}
+        className="max-w-full h-auto rounded border border-border"
+        style={{ maxHeight: "600px" }}
+        loading="lazy"
+        onError={() => setError(true)}
+      />
+    </div>
+  );
+}
+
+function CritiqueArtifactsViewer({
+  jobName,
+  trialName,
+  runName,
+  files,
+}: {
+  jobName: string;
+  trialName: string;
+  runName: string;
+  files: FileInfo[];
+}) {
+  if (files.length === 0) {
+    return (
+      <Empty>
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Package />
+          </EmptyMedia>
+          <EmptyTitle>No critique artifacts</EmptyTitle>
+          <EmptyDescription>
+            No additional files were saved for this critique.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  const MAX_ARTIFACTS = 10;
+  const totalFiles = files.length;
+  const truncated = totalFiles > MAX_ARTIFACTS;
+  const tabs = files.slice(0, MAX_ARTIFACTS).map((file) => ({
+    id: file.path,
+    label: file.path,
+    lang: getLanguageFromExtension(file.name),
+  }));
+
+  return (
+    <div>
+      <Tabs defaultValue={tabs[0].id}>
+        <TabsList>
+          {tabs.map((tab) => (
+            <TabsTrigger key={tab.id} value={tab.id}>
+              {tab.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        {tabs.map((tab) => (
+          <TabsContent key={tab.id} value={tab.id} className="mt-0 -mx-px">
+            {isImageFile(tab.id) ? (
+              <CritiqueArtifactImageContent
+                jobName={jobName}
+                trialName={trialName}
+                runName={runName}
+                filePath={tab.id}
+              />
+            ) : (
+              <CritiqueArtifactFileContent
+                jobName={jobName}
+                trialName={trialName}
+                runName={runName}
+                filePath={tab.id}
+                lang={tab.lang}
+              />
+            )}
+          </TabsContent>
+        ))}
+      </Tabs>
+      {truncated && (
+        <p className="px-4 py-2 text-xs text-muted-foreground border-t">
+          Only rendering first {MAX_ARTIFACTS} of {totalFiles} artifacts.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function CritiquesViewer({
   jobName,
   trialName,
@@ -1264,18 +1406,12 @@ function CritiquesViewer({
       id: "artifacts",
       label: "Artifacts",
       node: (
-        <Table>
-          <TableBody>
-            {selected.files.map((file) => (
-              <TableRow key={file.path}>
-                <TableCell className="font-mono text-xs">{file.path}</TableCell>
-                <TableCell className="text-right text-muted-foreground">
-                  {formatBytes(file.size)}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <CritiqueArtifactsViewer
+          jobName={jobName}
+          trialName={trialName}
+          runName={selected.run_name}
+          files={selected.files}
+        />
       ),
     });
   }
@@ -1565,6 +1701,10 @@ function AgentLogsViewer({
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg"]);
 
+function encodeArtifactPath(filePath: string): string {
+  return filePath.split("/").map(encodeURIComponent).join("/");
+}
+
 function isImageFile(filename: string): boolean {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
   return IMAGE_EXTENSIONS.has(ext);
@@ -1645,7 +1785,7 @@ function ArtifactImageContent({
 }) {
   const [error, setError] = useState(false);
   const stepQuery = step ? `?step=${encodeURIComponent(step)}` : "";
-  const src = `/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/files/artifacts/${filePath}${stepQuery}`;
+  const src = `/api/jobs/${encodeURIComponent(jobName)}/trials/${encodeURIComponent(trialName)}/files/artifacts/${encodeArtifactPath(filePath)}${stepQuery}`;
 
   if (error) {
     return (
@@ -1712,14 +1852,6 @@ function ArtifactsViewer({
         </EmptyHeader>
       </Empty>
     );
-  }
-
-  // Build a map from destination to source using manifest
-  const sourceMap = new Map<string, string>();
-  if (data.manifest) {
-    for (const entry of data.manifest as ArtifactManifestEntry[]) {
-      sourceMap.set(entry.destination, entry.source);
-    }
   }
 
   const MAX_ARTIFACTS = 10;

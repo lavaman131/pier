@@ -41,6 +41,7 @@ CRITIQUE_TASK_DIRNAME = "task"
 CRITIQUE_TRIAL_DIRNAME = "trial"
 CRITIQUE_RESULT_FILENAME = "critique-result.json"
 CRITIQUE_MARKDOWN_FILENAME = "critique-result.md"
+CRITIQUE_ARTIFACTS_DIRNAME = "critique-artifacts"
 CRITIQUE_RUNS_DIRNAME = ".critiques"
 REDACTED_CRITIQUE_PROMPT = "[redacted critique prompt]"
 
@@ -617,11 +618,13 @@ class CritiqueTrial:
     async def _upload_critique_inputs(self) -> None:
         task_dir = self._critique_task_dir()
         trial_dir = self._critique_trial_dir()
+        critique_artifacts_dir = self._critique_artifacts_dir()
         await self._environment.exec(
             "mkdir -p "
             f"{shlex.quote(task_dir.as_posix())} "
             f"{shlex.quote(trial_dir.as_posix())} "
-            f"{shlex.quote(self._environment.env_paths.artifacts_dir.as_posix())}",
+            f"{shlex.quote(self._environment.env_paths.artifacts_dir.as_posix())} "
+            f"{shlex.quote(critique_artifacts_dir.as_posix())}",
             user="root",
             timeout_sec=30,
         )
@@ -648,6 +651,7 @@ class CritiqueTrial:
         critique_trial_dir = self._critique_trial_dir()
         critique_result_path = self._critique_result_path()
         critique_markdown_path = self._critique_markdown_path()
+        critique_artifacts_dir = self._critique_artifacts_dir()
         values = {
             "task_dir": critique_task_dir.as_posix(),
             "trial_dir": critique_trial_dir.as_posix(),
@@ -655,6 +659,7 @@ class CritiqueTrial:
             "task_name": self._task.name,
             "critique_result_path": critique_result_path.as_posix(),
             "critique_markdown_path": critique_markdown_path.as_posix(),
+            "critique_artifacts_dir": critique_artifacts_dir.as_posix(),
         }
         prompt = _replace_template_vars(
             self.config.prompt_path.read_text(encoding="utf-8"), values
@@ -667,6 +672,9 @@ class CritiqueTrial:
             f"- Source trial files are available at `{critique_trial_dir.as_posix()}`.",
             f"- Write a valid JSON object to `{critique_result_path.as_posix()}`.",
             f"- You may also write Markdown notes to `{critique_markdown_path.as_posix()}`.",
+            "- Write any additional critique artifacts to "
+            f"`{critique_artifacts_dir.as_posix()}`; files under that directory "
+            "will be saved with the critique item.",
         ]
         return "\n\n".join(sections) + "\n"
 
@@ -688,6 +696,9 @@ class CritiqueTrial:
 
     def _critique_markdown_path(self) -> PurePosixPath:
         return self._environment.env_paths.artifacts_dir / CRITIQUE_MARKDOWN_FILENAME
+
+    def _critique_artifacts_dir(self) -> PurePosixPath:
+        return self._environment.env_paths.artifacts_dir / CRITIQUE_ARTIFACTS_DIRNAME
 
     async def _maybe_download_logs(self, source_dir: str, target_dir: Path) -> None:
         if self._are_agent_logs_downloaded:
@@ -837,6 +848,21 @@ class CritiqueTrial:
                     "status": "ok" if path.exists() else "missing",
                 }
             )
+        artifacts_dir = self._critique_paths.artifacts_dir / CRITIQUE_ARTIFACTS_DIRNAME
+        entries.append(
+            {
+                "source": self._critique_artifacts_dir().as_posix(),
+                "destination": f"artifacts/{CRITIQUE_ARTIFACTS_DIRNAME}",
+                "type": "directory",
+                "status": (
+                    "ok"
+                    if artifacts_dir.exists() and any(artifacts_dir.iterdir())
+                    else "empty"
+                    if artifacts_dir.exists()
+                    else "missing"
+                ),
+            }
+        )
         self._critique_paths.artifacts_manifest_path.write_text(
             json.dumps(entries, indent=2), encoding="utf-8"
         )

@@ -1,6 +1,6 @@
 You are critiquing one completed Harbor task trial. Explain whether the trial is a useful evaluation signal, attribute the outcome carefully, and ground claims in artifacts. Do not solve the task, modify files, or rerun the verifier.
 
-Pier provides `{task_dir}/` with the source task, `{trial_dir}/` with the completed trial, and `{critique_result_path}` for your JSON result.
+Pier provides `{task_dir}/` with the source task, `{trial_dir}/` with the completed trial, `{critique_result_path}` for your JSON result, and `{critique_artifacts_dir}` for optional supporting files.
 
 ## Inspect
 
@@ -25,7 +25,7 @@ Back specific factual claims with concise citations such as `path:line` plus a s
 
 ## Output
 
-Write a single valid JSON object to `{critique_result_path}`. Your final response must be only the same raw JSON, with no markdown fences or commentary.
+Write a single valid JSON object to `{critique_result_path}`. Optional supporting artifacts may be written under `{critique_artifacts_dir}`. Your final response must be only the same raw JSON, with no markdown fences or commentary.
 
 Required fields:
 

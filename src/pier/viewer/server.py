@@ -701,6 +701,46 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
         except Exception:
             return "[Error reading file]"
 
+    def _serve_file(full_path: Path) -> PlainTextResponse | FileResponse:
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+
+        if full_path.is_dir():
+            raise HTTPException(status_code=400, detail="Cannot read directory")
+
+        file_size = full_path.stat().st_size
+        if file_size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large: {_format_size(file_size)} "
+                    f"(max {_format_size(MAX_FILE_SIZE)})"
+                ),
+            )
+
+        image_extensions = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".svg": "image/svg+xml",
+        }
+        suffix = full_path.suffix.lower()
+        if suffix in image_extensions:
+            return FileResponse(
+                path=full_path,
+                media_type=image_extensions[suffix],
+                filename=full_path.name,
+            )
+
+        try:
+            return PlainTextResponse(full_path.read_text())
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=415, detail="File is binary and cannot be displayed"
+            )
+
     def _split_model_name(model_name: str | None) -> tuple[str | None, str | None]:
         if not model_name:
             return None, None
@@ -1146,7 +1186,11 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                     relative_path = (
                         f"{relative_base}/{item.name}" if relative_base else item.name
                     )
-                    if item.name == "manifest.json" and not relative_base:
+                    if not relative_base and item.name in {
+                        "manifest.json",
+                        CRITIQUE_RESULT_FILENAME,
+                        CRITIQUE_MARKDOWN_FILENAME,
+                    }:
                         continue
                     if item.is_dir():
                         scan_dir(item, relative_path)
@@ -3023,6 +3067,46 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
                 status_code=500, detail="Failed to parse critique trajectory.json"
             )
 
+    @app.get(
+        "/api/jobs/{job_name}/trials/{trial_name}/critiques/{critique_run_name}/artifacts/{file_path:path}",
+        response_model=None,
+    )
+    def get_trial_critique_artifact_file(
+        job_name: str,
+        trial_name: str,
+        critique_run_name: str,
+        file_path: str,
+    ) -> PlainTextResponse | FileResponse:
+        """Get content of a file saved as a critique artifact."""
+        trial_dir = _validate_trial_path(job_name, trial_name)
+        if not trial_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Trial '{trial_name}' not found in job '{job_name}'",
+            )
+
+        item_dir = _validate_critique_item_path(job_name, critique_run_name, trial_name)
+        if not item_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Critique run '{critique_run_name}' has no item "
+                    f"for trial '{trial_name}'"
+                ),
+            )
+
+        artifacts_dir = (item_dir / "artifacts").resolve()
+        try:
+            full_path = (artifacts_dir / file_path).resolve()
+            if artifacts_dir != full_path and artifacts_dir not in full_path.parents:
+                raise HTTPException(status_code=403, detail="Access denied")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid file path")
+
+        return _serve_file(full_path)
+
     @app.post("/api/jobs/{job_name}/trials/{trial_name}/summarize")
     async def summarize_trial(
         job_name: str, trial_name: str, request: TrialSummarizeRequest
@@ -3196,54 +3280,7 @@ def _register_job_endpoints(app: FastAPI, jobs_dir: Path) -> None:
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid file path")
 
-        if not full_path.exists():
-            raise HTTPException(status_code=404, detail="File not found")
-
-        if full_path.is_dir():
-            raise HTTPException(status_code=400, detail="Cannot read directory")
-
-        def _format_size(size_bytes: int) -> str:
-            """Format bytes as human-readable string."""
-            if size_bytes < 1024:
-                return f"{size_bytes} bytes"
-            elif size_bytes < 1024 * 1024:
-                return f"{size_bytes / 1024:.1f} KB"
-            else:
-                return f"{size_bytes / (1024 * 1024):.1f} MB"
-
-        # Check file size
-        file_size = full_path.stat().st_size
-        if file_size > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large: {_format_size(file_size)} (max {_format_size(MAX_FILE_SIZE)})",
-            )
-
-        # Handle image files - serve as binary with correct media type
-        image_extensions = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".gif": "image/gif",
-            ".webp": "image/webp",
-            ".svg": "image/svg+xml",
-        }
-        suffix = full_path.suffix.lower()
-        if suffix in image_extensions:
-            return FileResponse(
-                path=full_path,
-                media_type=image_extensions[suffix],
-                filename=full_path.name,
-            )
-
-        # For text files, read and return as plain text
-        try:
-            content = full_path.read_text()
-            return PlainTextResponse(content)
-        except UnicodeDecodeError:
-            raise HTTPException(
-                status_code=415, detail="File is binary and cannot be displayed"
-            )
+        return _serve_file(full_path)
 
     @app.get("/api/jobs/{job_name}/trials/{trial_name}/artifacts")
     def get_artifacts(
