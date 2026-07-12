@@ -107,7 +107,8 @@ touch "$LOG_DIR/squid_access.log" "$LOG_DIR/squid_cache.log"
 
 printf '%s' "$ALLOWLIST_DOMAINS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
   > "$ALLOWED_DOMAINS_FILE"
-chown -R proxy:proxy "$LOG_DIR"
+chmod 0644 "$ALLOWED_DOMAINS_FILE"
+chmod 0666 "$LOG_DIR/squid_access.log" "$LOG_DIR/squid_cache.log"
 
 
 htpasswd -bc /tmp/squid.passwd agent "$PROXY_TOKEN"
@@ -170,6 +171,19 @@ def write_docker_proxy_compose(
     proxy_dir.mkdir(parents=True, exist_ok=True)
     proxy_logs_dir = proxy_dir / "logs"
     proxy_logs_dir.mkdir(parents=True, exist_ok=True)
+    proxy_logs_dir.chmod(0o755)
+    # Create bind-mounted files on the host so the container never changes the
+    # directory owner. Squid only needs write permission on its two log files.
+    log_file_modes = {
+        "allowed_domains.txt": 0o644,
+        "squid_access.log": 0o666,
+        "squid_cache.log": 0o666,
+    }
+    for filename, mode in log_file_modes.items():
+        log_path = proxy_logs_dir / filename
+        if not log_path.exists():
+            log_path.touch()
+        log_path.chmod(mode)
     (proxy_dir / "Dockerfile").write_text(
         "\n".join(
             [

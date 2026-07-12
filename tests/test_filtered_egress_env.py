@@ -6,6 +6,7 @@ from pier.environments.agent_setup import (
     EGRESS_PROXY_SERVICE,
     docker_run_command,
     proxy_environment,
+    squid_bootstrap_command,
     write_docker_proxy_compose,
 )
 from pier.environments.base import ExecResult
@@ -27,6 +28,32 @@ def test_docker_proxy_compose_does_not_inject_proxy_env_into_main(tmp_path):
     assert "environment" not in main
     assert main["networks"] == ["pier-egress-internal"]
     assert EGRESS_PROXY_SERVICE in main["depends_on"]
+
+
+def test_docker_proxy_logs_remain_owned_by_host_user(tmp_path):
+    path = tmp_path / "docker-compose-egress-proxy.json"
+    proxy_dir = tmp_path / "proxy"
+
+    write_docker_proxy_compose(
+        path=path,
+        proxy_dir=proxy_dir,
+        allowlist=type("Allowlist", (), {"domains": ["api.openai.com"]})(),
+        token="secret",
+    )
+
+    logs_dir = proxy_dir / "logs"
+    assert logs_dir.stat().st_mode & 0o777 == 0o755
+    expected_modes = {
+        "allowed_domains.txt": 0o644,
+        "squid_access.log": 0o666,
+        "squid_cache.log": 0o666,
+    }
+    for filename, mode in expected_modes.items():
+        assert (logs_dir / filename).stat().st_mode & 0o777 == mode
+
+    bootstrap = squid_bootstrap_command()
+    assert 'chown -R proxy:proxy "$LOG_DIR"' not in bootstrap
+    assert 'chmod 0644 "$ALLOWED_DOMAINS_FILE"' in bootstrap
 
 
 def test_docker_agent_process_env_adds_proxy_only_for_agent_commands():
